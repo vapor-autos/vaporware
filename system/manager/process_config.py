@@ -10,13 +10,19 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started or params.get_bool("IsDriverViewEnabled")
+  return (started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")
 
 def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and CP.notCar
+  return started and CP.notCar and not params.get_bool("GCS")
 
 def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and not CP.notCar
+  return started and not CP.notCar and not params.get_bool("GCS")
+
+def gcs(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return params.get_bool("GCS")
+
+def ugv(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return params.get_bool("UGV")
 
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
@@ -38,22 +44,22 @@ def not_joystick(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not params.get_bool("JoystickDebugMode")
 
 def long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and params.get_bool("LongitudinalManeuverMode")
+  return started and params.get_bool("LongitudinalManeuverMode") and not params.get_bool("GCS")
 
 def lat_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and params.get_bool("LateralManeuverMode")
+  return started and params.get_bool("LateralManeuverMode") and not params.get_bool("GCS")
 
 def not_long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and not params.get_bool("LongitudinalManeuverMode")
+  return started and not params.get_bool("LongitudinalManeuverMode") and not params.get_bool("GCS")
 
 def qcomgps(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not ublox_available()
 
 def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return True
+  return not params.get_bool("GCS")
 
 def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started
+  return started and not params.get_bool("GCS")
 
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
