@@ -129,6 +129,7 @@ procs = [
 
   # turbo gcs procs
   PythonProcess("g29d", "tools.turbo.g29d", gcs, enabled=PC),
+  NativeProcess("turbo_gcs_control_bridge", "cereal/messaging", ["./bridge"], gcs, enabled=PC),
   NativeProcess("turbo_gcs_bridge", "cereal/messaging",
                 ["./bridge", TURBO_UGV_IP or "127.0.0.1", "roadEncodeData,driverEncodeData,wideRoadEncodeData"],
                 gcs, enabled=PC and TURBO_UGV_IP is not None),
