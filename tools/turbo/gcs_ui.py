@@ -5,7 +5,8 @@ import pyray as rl
 
 from cereal import messaging
 from msgq.visionipc import VisionStreamType
-from openpilot.system.ui.lib import application as ui_app
+from openpilot.selfdrive.ui.onroad.cameraview import CameraView
+from openpilot.system.ui.lib.application import GuiApplication
 from openpilot.system.ui.widgets import Widget
 
 
@@ -22,10 +23,7 @@ def _gcs_window_size() -> tuple[int, int]:
   return size
 
 
-ui_app.gui_app = ui_app.GuiApplication(*_gcs_window_size())
-gui_app = ui_app.gui_app
-
-from openpilot.selfdrive.ui.onroad.cameraview import CameraView
+gui_app = GuiApplication(*_gcs_window_size())
 
 
 class GcsUi(Widget):
