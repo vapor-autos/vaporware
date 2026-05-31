@@ -79,6 +79,9 @@ dependencies = [
   "qrcode",
   "jeepney",
   "pillow",
+
+  # turbo
+  "g29py==0.0.15",
 ]
 
 [project.optional-dependencies]

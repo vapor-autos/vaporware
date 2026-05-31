@@ -124,6 +124,9 @@ procs = [
   PythonProcess("webrtcd", "system.webrtc.webrtcd", notcar),
   PythonProcess("webjoystick", "tools.bodyteleop.web", notcar),
   PythonProcess("joystick", "tools.joystick.joystick_control", and_(joystick, iscar)),
+
+  # turbo gcs procs
+  PythonProcess("g29d", "tools.turbo.g29d", gcs),
 ]
 
 managed_processes = {p.name: p for p in procs}

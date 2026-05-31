@@ -1120,6 +1120,21 @@ struct EncodeIndex {
   }
 }
 
+struct G29 {
+  accelerator @0 :Float32;
+  steering @1 :Float32;
+  reverse @2 :Float32;
+  dpadUp @3 :Bool;
+  dpadDown @4 :Bool;
+  dpadLeft @5 :Bool;
+  dpadRight @6 :Bool;
+  l2 @7 :Bool;
+  l3 @8 :Bool;
+  r2 @9 :Bool;
+  r3 @10 :Bool;
+  dial @11 :Int32;
+}
+
 struct AndroidLogEntry {
   id @0 :UInt8;
   ts @1 :UInt64;
@@ -2548,9 +2563,9 @@ struct Event {
     # DO change the name of the field and struct
     # DON'T change the ID (e.g. @107)
     # DON'T change which struct it points to
-    customReserved0 @107 :Custom.CustomReserved0;
-    customReserved1 @108 :Custom.CustomReserved1;
-    customReserved2 @109 :Custom.CustomReserved2;
+    g29 @107 :G29;
+    teleopSendCan @108 :List(CanData);
+    teleopCarControl @109 :Car.CarControl;
     customReserved3 @110 :Custom.CustomReserved3;
     customReserved4 @111 :Custom.CustomReserved4;
     customReserved5 @112 :Custom.CustomReserved5;
