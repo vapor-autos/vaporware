@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import time
 
-from g29py import G29
-
 import cereal.messaging as messaging
 
 RETRY_DELAY = 2.0
@@ -32,6 +30,8 @@ def _publish_state(sock, state: dict, dial: int) -> None:
 
 
 def _run(sock) -> None:
+  from g29py import G29
+
   g29 = None
   try:
     g29 = G29()
