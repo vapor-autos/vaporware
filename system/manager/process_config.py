@@ -8,6 +8,7 @@ from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return (started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")
@@ -126,7 +127,14 @@ procs = [
   PythonProcess("joystick", "tools.joystick.joystick_control", and_(joystick, iscar)),
 
   # turbo gcs procs
-  PythonProcess("g29d", "tools.turbo.g29d", gcs),
+  PythonProcess("g29d", "tools.turbo.g29d", gcs, enabled=PC),
+  NativeProcess("turbo_gcs_bridge", "cereal/messaging",
+                ["./bridge", TURBO_UGV_IP or "127.0.0.1", "roadEncodeData,driverEncodeData,wideRoadEncodeData"],
+                gcs, enabled=PC and TURBO_UGV_IP is not None),
+  NativeProcess("turbo_camerastream", "tools/camerastream", ["./compressed_vipc.py", "127.0.0.1", "--cams", "0,1,2", "--silent"],
+                gcs, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
+  PythonProcess("gcs_ui", "tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
+  PythonProcess("gcs_debug_ui", "selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
 ]
 
 managed_processes = {p.name: p for p in procs}
