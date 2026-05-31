@@ -440,6 +440,18 @@ wheels = [
 ]
 
 [[package]]
+name = "g29py"
+version = "0.0.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "hidapi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/65/5587c1a865731fd89290ab99f80040304ea589c5e5c2f0aef322e11fdea6/g29py-0.0.15.tar.gz", hash = "sha256:920f030a7b4386c0962695c570f644d87631dd820d7fd87354d0f85ddc23b9cd", size = 6780, upload-time = "2026-05-31T02:32:26.181Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/71/4ceb347cfab417d75bd23d0009bc720a12f0f8210888960df7947ea36b86/g29py-0.0.15-py3-none-any.whl", hash = "sha256:f1246ba390be1e425755efe5cea7c12fde2ec8f0fa2197103df12f0e172d49a4", size = 7917, upload-time = "2026-05-31T02:32:27.067Z" },
+]
+
+[[package]]
 name = "gcc-arm-none-eabi"
 version = "13.2.1"
 source = { git = "https://github.com/commaai/dependencies.git?subdirectory=gcc-arm-none-eabi&rev=release-gcc-arm-none-eabi#15791161bd7a752ef821ad6d999a364b13d6e9ca" }
@@ -460,6 +472,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/a9/a780cc66f86335a6019f557a8aaca8fbb970728f0efd2430d15ff1beae0e/google_crc32c-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:14f87e04d613dfa218d6135e81b78272c3b904e2a7053b841481b38a7d901411", size = 33364, upload-time = "2025-12-16T00:40:22.96Z" },
     { url = "https://files.pythonhosted.org/packages/21/3f/3457ea803db0198c9aaca2dd373750972ce28a26f00544b6b85088811939/google_crc32c-1.8.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb5c869c2923d56cb0c8e6bcdd73c009c36ae39b652dbe46a05eb4ef0ad01454", size = 33740, upload-time = "2025-12-16T00:40:23.96Z" },
     { url = "https://files.pythonhosted.org/packages/df/c0/87c2073e0c72515bb8733d4eef7b21548e8d189f094b5dad20b0ecaf64f6/google_crc32c-1.8.0-cp312-cp312-win_amd64.whl", hash = "sha256:3cc0c8912038065eafa603b238abf252e204accab2a704c63b9e14837a854962", size = 34437, upload-time = "2025-12-16T00:35:21.395Z" },
+]
+
+[[package]]
+name = "hidapi"
+version = "0.14.0.post4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/47/72/21ccaaca6ffb06f544afd16191425025d831c2a6d318635e9c8854070f2d/hidapi-0.14.0.post4.tar.gz", hash = "sha256:48fce253e526d17b663fbf9989c71c7ef7653ced5f4be65f1437c313fb3dbdf6", size = 174388, upload-time = "2024-11-19T16:38:10.316Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/9a/9b7d5d5e2c003aed2fecdc348caff8d3b6a8ead0220da489ccb822d7e5ef/hidapi-0.14.0.post4-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:129d684c2760fafee9014ce63a58d8e2699cdf00cd1a11bb3d706d4715f5ff96", size = 71668, upload-time = "2024-11-19T16:36:28.666Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/e5/a919eb542a692cc27dc58b1997dd860cace0e4c64e38c8bf9236ff8b95b7/hidapi-0.14.0.post4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:4f04de00e40db2efc0bcdd047c160274ba7ccd861100fd87c295dd63cb932f2f", size = 69146, upload-time = "2024-11-19T16:36:30.484Z" },
+    { url = "https://files.pythonhosted.org/packages/37/7c/63316c8cba89cc039a952bb8805c3fb585e79f7fc8a5d27acaa6beb2fe81/hidapi-0.14.0.post4-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:10a01af155c51a8089fe44e627af2fbd323cfbef7bd55a86837d971aef6088b0", size = 1083772, upload-time = "2024-11-19T16:36:32.798Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/a8/bb222e3f096467d8e37c717000b9b0c6acee043c1145eaaeba4abfc8cffd/hidapi-0.14.0.post4-cp312-cp312-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:6eaff1d120c47e1a121eada8dc85eac007d1ed81f3db7fc0da5b6ed17d8edefb", size = 1081215, upload-time = "2024-11-19T16:36:35.512Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/c8/52134f7d3e09fd4feb7756ccd872c55bfd1899ee81ceed4f8ad5ae39f457/hidapi-0.14.0.post4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fedb9c3be6a2376de436d13fcb37a686a9b6bc988585bcc4f5ec61cad925e794", size = 1077222, upload-time = "2024-11-19T16:36:38.062Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/da/88ebbd465dbaff04e9ef3bbdb4a6ca9d24a3458e4726878dbe26bb69236e/hidapi-0.14.0.post4-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:6270677da02e86b56b81afd5f6f313736b8315b493f3c8a431da285e3a3c5de9", size = 694510, upload-time = "2024-11-19T16:36:39.572Z" },
+    { url = "https://files.pythonhosted.org/packages/da/f0/ea437ed339c5f0b446983011000d8cad8c4f8a51ee39e837d16e101b66da/hidapi-0.14.0.post4-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:da700db947562f8c0ac530215b74b5a27e4c669916ec99cfb5accd14ba08562c", size = 682635, upload-time = "2024-11-19T16:36:41.35Z" },
+    { url = "https://files.pythonhosted.org/packages/01/e9/14e63f1a5ec0c2430b84695d28e994b2b63398544adb20d910f6dc41ac66/hidapi-0.14.0.post4-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:707b1ebf5cb051b020e94b039e603351bf2e6620b48fc970228e0dd5d3a91fca", size = 701667, upload-time = "2024-11-19T16:36:43.135Z" },
+    { url = "https://files.pythonhosted.org/packages/df/3d/8a37ed1b250ae45eb7fa5cd3227c865d38a1ddf9ccab626f4f6adfbd424a/hidapi-0.14.0.post4-cp312-cp312-win32.whl", hash = "sha256:1487312ad50cf2c08a5ea786167b3229afd6478c4b26974157c3845a84e91231", size = 63123, upload-time = "2024-11-19T16:36:44.329Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/fd/e642211e579875e35015aed12d3b2c2a25f6a731ff846a2c2aaaf4bf8898/hidapi-0.14.0.post4-cp312-cp312-win_amd64.whl", hash = "sha256:8d924bd002a1c17ca51905b3b7b3d580e80ec211a9b8fe4667b73db0ff9e9b54", size = 70478, upload-time = "2024-11-19T16:36:45.388Z" },
 ]
 
 [[package]]
@@ -764,6 +797,7 @@ dependencies = [
     { name = "cython" },
     { name = "eigen" },
     { name = "ffmpeg" },
+    { name = "g29py" },
     { name = "gcc-arm-none-eabi" },
     { name = "git-lfs" },
     { name = "inputs" },
@@ -846,6 +880,7 @@ requires-dist = [
     { name = "cython" },
     { name = "eigen", git = "https://github.com/commaai/dependencies.git?subdirectory=eigen&rev=release-eigen" },
     { name = "ffmpeg", git = "https://github.com/commaai/dependencies.git?subdirectory=ffmpeg&rev=release-ffmpeg" },
+    { name = "g29py", specifier = "==0.0.15" },
     { name = "gcc-arm-none-eabi", git = "https://github.com/commaai/dependencies.git?subdirectory=gcc-arm-none-eabi&rev=release-gcc-arm-none-eabi" },
     { name = "git-lfs", git = "https://github.com/commaai/dependencies.git?subdirectory=git-lfs&rev=release-git-lfs" },
     { name = "hypothesis", marker = "extra == 'testing'", specifier = "==6.47.*" },
