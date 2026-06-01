@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import time
 
 import cereal.messaging as messaging
 from opendbc.can.packer import CANPacker
@@ -47,7 +46,7 @@ def main() -> None:
     if sm.updated["carControl"]:
       car_control_enabled = sm["carControl"].enabled
 
-    for msg in messaging.drain_sock(g29_sock, wait_for_one=True):
+    for msg in messaging.drain_sock(g29_sock):
       if msg.which() != "g29":
         continue
 
@@ -77,7 +76,6 @@ def main() -> None:
               f"car_control_enabled={car_control_enabled} can=[{addrs}]", flush=True)
 
     rk.keep_time()
-    time.sleep(0)
 
 
 if __name__ == "__main__":
