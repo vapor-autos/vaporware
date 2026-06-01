@@ -9,6 +9,7 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
+GCS_IP = os.getenv("GCS_IP")
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return (started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")
@@ -128,6 +129,7 @@ procs = [
 
   # turbo gcs procs
   PythonProcess("g29d", "tools.turbo.g29d", gcs, enabled=PC),
+  NativeProcess("turbo_gcs_control_bridge", "cereal/messaging", ["./bridge"], gcs, enabled=PC),
   NativeProcess("turbo_gcs_bridge", "cereal/messaging",
                 ["./bridge", TURBO_UGV_IP or "127.0.0.1", "roadEncodeData,driverEncodeData,wideRoadEncodeData"],
                 gcs, enabled=PC and TURBO_UGV_IP is not None),
@@ -135,6 +137,11 @@ procs = [
                 gcs, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
   PythonProcess("gcs_ui", "tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
   PythonProcess("gcs_debug_ui", "selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
+
+  # turbo ugv procs
+  NativeProcess("turbo_ugv_g29_bridge", "cereal/messaging", ["./bridge", GCS_IP or "127.0.0.1", "g29"],
+                ugv, enabled=not PC and GCS_IP is not None),
+  PythonProcess("teleopd", "tools.turbo.teleopd", ugv, enabled=not PC),
 ]
 
 managed_processes = {p.name: p for p in procs}

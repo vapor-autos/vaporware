@@ -10,22 +10,27 @@ def _dial_delta(events: list[dict]) -> int:
   return sum(int(event.get("delta", 0)) for event in events if event.get("type") == "dial")
 
 
-def _publish_state(sock, state: dict, dial: int) -> None:
+def _button_down_events(events: list[dict]) -> set[str]:
+  return {event["control"] for event in events if event.get("type") == "button_down" and "control" in event}
+
+
+def _publish_state(sock, state: dict, events: list[dict]) -> None:
   buttons = state["buttons"]
+  button_down = _button_down_events(events)
 
   msg = messaging.new_message("g29")
   msg.g29.steering = state["steering"]
   msg.g29.accelerator = state["accelerator"]
   msg.g29.reverse = state["clutch"]
-  msg.g29.dpadUp = bool(buttons["up"])
-  msg.g29.dpadDown = bool(buttons["down"])
+  msg.g29.dpadUp = "up" in button_down
+  msg.g29.dpadDown = "down" in button_down
   msg.g29.dpadLeft = bool(buttons["left"])
   msg.g29.dpadRight = bool(buttons["right"])
-  msg.g29.l2 = bool(buttons["L2"])
-  msg.g29.l3 = bool(buttons["L3"])
+  msg.g29.l2 = "L2" in button_down
+  msg.g29.l3 = "L3" in button_down
   msg.g29.r2 = bool(buttons["R2"])
   msg.g29.r3 = bool(buttons["R3"])
-  msg.g29.dial = dial
+  msg.g29.dial = _dial_delta(events)
   sock.send(msg.to_bytes())
 
 
@@ -41,7 +46,7 @@ def _run(sock) -> None:
 
     while True:
       time.sleep(0.02)
-      _publish_state(sock, g29.get_state(), _dial_delta(g29.get_events()))
+      _publish_state(sock, g29.get_state(), g29.get_events())
   finally:
     if g29 is not None:
       g29.force_off()

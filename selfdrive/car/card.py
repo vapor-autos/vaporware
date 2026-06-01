@@ -64,6 +64,7 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
+    self.teleop_can_sock = messaging.sub_sock('teleopSendCan', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'])
 
@@ -257,17 +258,27 @@ class Car:
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       time.sleep(0.1)
 
+  def teleop_can_passthrough_thread(self, evt):
+    rk = Ratekeeper(50, print_delay_threshold=None)
+    while not evt.is_set():
+      for msg in messaging.drain_sock_raw(self.teleop_can_sock):
+        self.pm.sock['sendcan'].send(msg)
+      rk.keep_time()
+
   def card_thread(self):
     e = threading.Event()
     t = threading.Thread(target=self.params_thread, args=(e, ))
+    teleop_t = threading.Thread(target=self.teleop_can_passthrough_thread, args=(e, ))
     try:
       t.start()
+      teleop_t.start()
       while True:
         self.step()
         self.rk.monitor_time()
     finally:
       e.set()
       t.join()
+      teleop_t.join()
 
 
 def main():
