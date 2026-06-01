@@ -259,10 +259,11 @@ class Car:
       time.sleep(0.1)
 
   def teleop_can_passthrough_thread(self, evt):
+    rk = Ratekeeper(50, print_delay_threshold=None)
     while not evt.is_set():
-      for msg in messaging.drain_sock_raw(self.teleop_can_sock, wait_for_one=True):
+      for msg in messaging.drain_sock_raw(self.teleop_can_sock):
         self.pm.sock['sendcan'].send(msg)
-      time.sleep(0.02)
+      rk.keep_time()
 
   def card_thread(self):
     e = threading.Event()
