@@ -139,6 +139,8 @@ procs = [
   PythonProcess("gcs_debug_ui", "selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
 
   # turbo ugv procs
+  NativeProcess("turbo_ugv_camera_bridge", "cereal/messaging", ["./bridge"],
+                ugv, enabled=not PC),
   NativeProcess("turbo_ugv_g29_bridge", "cereal/messaging", ["./bridge", GCS_IP or "127.0.0.1", "g29"],
                 ugv, enabled=not PC and GCS_IP is not None),
   PythonProcess("teleopd", "tools.turbo.teleopd", ugv, enabled=not PC),
