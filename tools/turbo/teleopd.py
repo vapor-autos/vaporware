@@ -30,7 +30,7 @@ def throttle_cmd(accelerator: float, reverse: float) -> int:
 
 
 def steer_cmd(steering: float) -> int:
-  return int(clip(steering, -1.0, 1.0) * MAX_STEER_CMD)
+  return int(-clip(steering, -1.0, 1.0) * MAX_STEER_CMD)
 
 
 def button_event_can_msgs(packer: CANPacker, g29) -> list[tuple[int, bytes, int]]:
