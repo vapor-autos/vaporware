@@ -24,7 +24,7 @@ if [ -f "$LAUNCH_ENV_DIR/.env" ]; then
 fi
 
 if [ -z "$AGNOS_VERSION" ]; then
-  export AGNOS_VERSION="18.3"
+  export AGNOS_VERSION="18.4"
 fi
 
 export STAGING_ROOT="/data/safe_staging"
