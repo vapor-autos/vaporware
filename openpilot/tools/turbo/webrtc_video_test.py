@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import dataclasses
 import json
+import os
 import time
 
 import aiortc
@@ -106,10 +107,10 @@ async def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
   parser = argparse.ArgumentParser(description="Receive one camera from openpilot webrtcd and print decoded frame stats")
-  parser.add_argument("--host", default="127.0.0.1", help="UGV/webrtcd host")
+  parser.add_argument("--host", default=os.getenv("TURBO_UGV_IP", "127.0.0.1"), help="UGV/webrtcd host")
   parser.add_argument("--port", type=int, default=5001, help="UGV/webrtcd HTTP signaling port")
   parser.add_argument("--camera", choices=("road", "wideRoad", "driver"), default="wideRoad", help="camera to request")
-  parser.add_argument("--duration", type=float, default=10.0, help="seconds to run; <=0 runs until disconnected")
+  parser.add_argument("--duration", type=float, default=0.0, help="seconds to run; <=0 runs until disconnected")
   parser.add_argument("--log-interval", type=float, default=1.0, help="frame log interval in seconds")
   parser.add_argument("--messaging", action="store_true", help="create a WebRTC data channel")
   parser.add_argument("--stats", action="store_true", help="print periodic WebRTC stats")
