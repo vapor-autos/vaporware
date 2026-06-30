@@ -12,6 +12,7 @@ class StreamRequestBody:
   enabled: bool
   bridge_services_in: list[str] = field(default_factory=list)
   bridge_services_out: list[str] = field(default_factory=list)
+  cameras: list[str] = field(default_factory=list)
 
 
 def post_stream_request(body: StreamRequestBody) -> dict:

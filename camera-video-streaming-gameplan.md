@@ -499,6 +499,176 @@ Do not delete the current `compressed_vipc.py` bridge path yet. It is simple, al
 
 The right next step is to prove direct UGV `webrtcd` with a one-camera teleoprtc GCS client, then extend the server to support multiple outgoing camera tracks. Once that works, the GCS UI can move from local VIPC camera views to WebRTC-backed camera views without losing the existing LAN fallback.
 
+## Progress Update: 2026-06-30
+
+Branch: `webrtc-vid`
+
+Completed:
+
+- added `openpilot/tools/turbo/webrtc_video_test.py`
+- verified same-machine debug WebRTC server/client on GCS
+- verified real UGV H264 WebRTC over LAN
+- verified both `wideRoad` and `driver` single-camera sessions:
+  - `1344x760`
+  - about `20 fps`
+  - `packetsLost=0`
+- updated `process_config.py` so `UGV=True` starts:
+  - `stream_encoderd`
+  - `webrtcd`
+- added a GCS-side managed WebRTC receive/test process:
+  - `turbo_webrtc_video`
+  - enabled when `GCS=True` and `TURBO_UGV_IP` is set
+- added multi-camera request/session support:
+  - optional `StreamRequestBody.cameras`
+  - `webrtcd.StreamSession` creates one video track per requested camera
+  - existing `init_camera` single-camera behavior remains compatible
+- extended `webrtc_video_test.py` with `--cameras`
+- verified one local debug WebRTC session carrying `wideRoad`, `driver`, and `road`
+
+Important operational notes:
+
+- The UGV must run manager with realtime privileges. Starting manager from a plain SSH user shell caused `PermissionError` in realtime scheduling and `encoderd --stream` assertion failures. Running launch under `sudo -E` fixed this.
+- UGV process-config ownership is now verified: after clean restart, manager owns `./encoderd --stream`, `openpilot.system.webrtc.webrtcd`, and `./camerad`.
+- Current GCS WebRTC process is still headless/test-only. It receives and decodes frames but does not render into `gcs_ui`.
+
+## UI Integration Research
+
+Current GCS UI path:
+
+- `openpilot/tools/turbo/gcs_ui.py`
+- uses `CameraView("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD)`
+- uses `CameraView("camerad", VisionStreamType.VISION_STREAM_DRIVER)`
+- renders wide full screen and driver as an overlay
+
+Current `CameraView` path:
+
+- `openpilot/selfdrive/ui/onroad/cameraview.py`
+- consumes `VisionIpcClient`
+- receives `VisionBuf`
+- on PC, uploads Y and UV planes into two raylib textures
+- renders with an NV12/YUV shader
+
+Current WebRTC receive path:
+
+- `teleoprtc.WebRTCOfferBuilder` requests one or more incoming video tracks
+- incoming frames are `PyAV VideoFrame`s from aiortc
+- `webrtc_video_test.py` currently consumes one camera and prints frame stats
+
+Therefore there are two realistic UI approaches.
+
+### UI Option A: WebRTC-to-VIPC Adapter
+
+Create a GCS-side adapter that:
+
+- opens one WebRTC session
+- requests all needed cameras
+- decodes incoming `VideoFrame`s
+- converts each frame to the existing VIPC pixel format
+- publishes frames into a local `VisionIpcServer("camerad")`
+
+Then `gcs_ui.py` can continue using the existing `CameraView` unchanged.
+
+Pros:
+
+- minimal UI changes
+- existing layout/rendering/shaders stay intact
+- supports all current `VisionStreamType` rendering paths
+- easy fallback between existing `compressed_vipc.py` and WebRTC adapter
+
+Cons:
+
+- extra copy/conversion step
+- WebRTC frame decode likely produces RGB/YUV frames that must be repacked to match VIPC expectations
+- still does not solve multi-camera server support by itself
+
+Working recommendation for next implementation: use this adapter first. It gets WebRTC into the existing GCS UI with the least UI risk.
+
+### UI Option B: Direct WebRTC Camera Widget
+
+Create a new `WebRTCCameraView` widget that:
+
+- owns or subscribes to a WebRTC receive session
+- drains tracks on background asyncio/thread workers
+- stores latest frame per camera
+- uploads RGB/RGBA frames into a raylib texture
+- renders with `draw_texture_pro`
+
+Pros:
+
+- no fake local VIPC server
+- simpler conceptual path long term
+- can use decoded RGB frames directly
+
+Cons:
+
+- more UI/threading work
+- more texture upload code
+- needs careful lifecycle handling inside raylib app
+- duplicates pieces of `CameraView`
+
+Keep this as the later cleaner UI path once the transport and multi-camera semantics are stable.
+
+## Multi-Camera Research
+
+Need: all three cameras eventually:
+
+- `wideRoad`
+- `driver`
+- `road`
+
+Current server limitation:
+
+- `StreamSession` creates only one `LiveStreamVideoStreamTrack(body.init_camera)`
+- `StreamRequestBody` has only `init_camera`, not `cameras`
+- camera switching exists via data-channel message `livestreamCameraSwitch`, but that is one track switching source, not simultaneous cameras
+
+teleoprtc capability:
+
+- `WebRTCOfferBuilder.offer_to_receive_video_stream(camera)` can request multiple incoming tracks
+- `WebRTCBaseStream` stores incoming tracks by camera id
+- `WebRTCAnswerBuilder.add_video_stream(camera, track)` can add multiple outgoing video tracks
+
+So the library can support multiple tracks. The openpilot `webrtcd.StreamSession` wrapper is the limiting piece.
+
+Recommended server change:
+
+- extend `StreamRequestBody` with optional `cameras: list[str]`
+- keep `init_camera` for backward compatibility
+- effective camera list:
+  - `body.cameras` if present/non-empty
+  - else `[body.init_camera]`
+- in `StreamSession.__init__`, create one `LiveStreamVideoStreamTrack(camera, enabled)` per camera
+- call `builder.add_video_stream(camera, track)` for each
+- store `self.video_tracks: dict[str, LiveStreamVideoStreamTrack]`
+- keep `self.video_track` compatibility pointing at the init/primary track if needed
+- update `message_handler`:
+  - `livestreamVideoEnable` applies to all tracks
+  - `enableTimingSei` applies to all tracks
+  - `livestreamCameraSwitch` only applies to primary track, or is ignored in multi-camera mode
+- update cleanup to stop all tracks
+
+Recommended client change:
+
+- update `webrtc_video_test.py` or add `webrtc_vipc.py` to request `--cameras wideRoad,driver,road`
+- POST body should include both:
+  - `init_camera`: first camera for compatibility
+  - `cameras`: full list for new server
+
+## Next Steps From Here
+
+1. Add multi-camera support to `StreamRequestBody` and `webrtcd.StreamSession`.
+2. Extend `webrtc_video_test.py` to request and consume multiple cameras in one session.
+3. Verify one WebRTC session can carry `wideRoad`, `driver`, and `road` simultaneously over LAN.
+4. Build `openpilot/tools/turbo/webrtc_vipc.py`:
+   - connect to UGV `webrtcd`
+   - request all configured cameras
+   - publish decoded frames to local `VisionIpcServer("camerad")`
+5. Change GCS process config:
+   - replace/disable `turbo_camerastream` when using WebRTC VIPC adapter
+   - run `turbo_webrtc_vipc` under `GCS=True` and `TURBO_UGV_IP is not None`
+6. Keep `gcs_ui.py` unchanged initially and let it consume local VIPC from the adapter.
+7. After adapter works, decide whether to replace it with direct `WebRTCCameraView`.
+
 ## Concrete Next Branch Plan
 
 Branch: `webrtc-vid`
