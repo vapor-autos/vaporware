@@ -62,14 +62,16 @@ async def run(args: argparse.Namespace) -> None:
   stream = builder.stream()
   stats_task = None
   frames = 0
-  start_time = time.monotonic()
-  last_log_time = start_time
+  start_time = 0.0
+  last_log_time = 0.0
   last_log_frames = 0
 
   try:
     await stream.start()
     await stream.wait_for_connection()
     print(f"connected camera={args.camera}", flush=True)
+    start_time = time.monotonic()
+    last_log_time = start_time
 
     if args.stats:
       stats_task = asyncio.create_task(print_stats(stream, args.stats_interval))
