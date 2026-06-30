@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import openpilot.cereal.messaging as messaging
 from opendbc.can.packer import CANPacker
 from openpilot.common.realtime import Ratekeeper
@@ -77,8 +75,12 @@ def main() -> None:
 
       if rk.frame % LOG_INTERVAL_FRAMES == 0:
         addrs = ", ".join(f"0x{addr:x}" for addr, _, _ in can_msgs)
-        print(f"teleopd g29 steer={g29.steering:.3f} accel={g29.accelerator:.3f} reverse={g29.reverse:.3f} "
-              f"car_control_enabled={car_control_enabled} can=[{addrs}]", flush=True)
+        log = (f"teleopd g29 steer={g29.steering:.3f} accel={g29.accelerator:.3f} reverse={g29.reverse:.3f} "
+               + f"car_control_enabled={car_control_enabled} can=[{addrs}]")
+        print(
+          log,
+          flush=True,
+        )
 
     rk.keep_time()
 
