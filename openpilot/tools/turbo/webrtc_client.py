@@ -1,17 +1,14 @@
 import asyncio
+from dataclasses import asdict
 
 import aiortc
 import requests
 
-from msgq.visionipc import VisionStreamType
+from openpilot.system.webrtc.helpers import StreamRequestBody
 from teleoprtc import WebRTCOfferBuilder, StreamingOffer
 
 
-CAMERA_STREAMS = {
-  "road": VisionStreamType.VISION_STREAM_ROAD,
-  "driver": VisionStreamType.VISION_STREAM_DRIVER,
-  "wideRoad": VisionStreamType.VISION_STREAM_WIDE_ROAD,
-}
+CAMERA_TYPES = ("road", "driver", "wideRoad")
 
 
 class WebrtcdConnectionProvider:
@@ -21,17 +18,15 @@ class WebrtcdConnectionProvider:
     self.enabled = enabled
 
   async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
-    body = {
-      "sdp": offer.sdp,
-      "init_camera": self.cameras[0],
-      "enabled": self.enabled,
-      "bridge_services_in": [],
-      "bridge_services_out": [],
-      "cameras": self.cameras,
-    }
+    body = StreamRequestBody(
+      sdp=offer.sdp,
+      init_camera=self.cameras[0],
+      enabled=self.enabled,
+      cameras=self.cameras,
+    )
 
     def post_offer() -> dict:
-      resp = requests.post(self.url, json=body, timeout=10)
+      resp = requests.post(self.url, json=asdict(body), timeout=10)
       resp.raise_for_status()
       return resp.json()
 
@@ -44,7 +39,7 @@ def parse_cameras(cameras_arg: str) -> list[str]:
   if not cameras:
     raise ValueError("at least one camera is required")
 
-  unknown = sorted(set(cameras) - set(CAMERA_STREAMS))
+  unknown = sorted(set(cameras) - set(CAMERA_TYPES))
   if unknown:
     raise ValueError(f"unknown cameras: {','.join(unknown)}")
   return cameras

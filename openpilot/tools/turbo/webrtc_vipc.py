@@ -10,7 +10,14 @@ import av
 import numpy as np
 
 from msgq.visionipc import VisionIpcServer, VisionStreamType
-from openpilot.tools.turbo.webrtc_client import CAMERA_STREAMS, build_offer, parse_cameras
+from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras
+
+
+CAMERA_STREAMS = {
+  "road": VisionStreamType.VISION_STREAM_ROAD,
+  "driver": VisionStreamType.VISION_STREAM_DRIVER,
+  "wideRoad": VisionStreamType.VISION_STREAM_WIDE_ROAD,
+}
 
 
 def frame_to_nv12(frame: av.VideoFrame) -> np.ndarray:
