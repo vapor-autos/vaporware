@@ -524,6 +524,11 @@ Completed:
   - existing `init_camera` single-camera behavior remains compatible
 - extended `webrtc_video_test.py` with `--cameras`
 - verified one local debug WebRTC session carrying `wideRoad`, `driver`, and `road`
+- verified one real UGV WebRTC session carrying `wideRoad`, `driver`, and `road`
+  - default/high quality stalls after a few seconds
+  - `low` quality ran 10 seconds cleanly at about `20 fps`
+  - `med` quality ran 10 seconds cleanly at about `20 fps`
+  - no packet loss observed in the clean `low`/`med` runs
 
 Important operational notes:
 
@@ -668,6 +673,12 @@ Recommended client change:
    - run `turbo_webrtc_vipc` under `GCS=True` and `TURBO_UGV_IP is not None`
 6. Keep `gcs_ui.py` unchanged initially and let it consume local VIPC from the adapter.
 7. After adapter works, decide whether to replace it with direct `WebRTCCameraView`.
+
+Current step status:
+
+- Steps 1 and 2 are complete and committed.
+- Step 3 is functionally complete at `low` and `med` quality. High/default bitrate is too aggressive for all three streams and should not be the default for triple-camera GCS.
+- Step 4 is next.
 
 ## Concrete Next Branch Plan
 

@@ -50,7 +50,7 @@ async def print_stats(stream, interval: float) -> None:
     summary = {}
     for stat in report.values():
       if stat.type in ("inbound-rtp", "remote-outbound-rtp", "transport", "candidate-pair"):
-        summary[stat.type] = stat_dict(stat)
+        summary[f"{stat.type}:{stat.id}"] = stat_dict(stat)
     if summary:
       print(json.dumps({"stats": summary}, default=str, sort_keys=True), flush=True)
 
@@ -64,7 +64,7 @@ async def run(args: argparse.Namespace) -> None:
   builder = WebRTCOfferBuilder(WebrtcdConnectionProvider(args.host, args.port, cameras))
   for camera in cameras:
     builder.offer_to_receive_video_stream(camera)
-  if args.messaging:
+  if args.messaging or args.quality:
     builder.add_messaging()
 
   stream = builder.stream()
@@ -80,6 +80,10 @@ async def run(args: argparse.Namespace) -> None:
     print(f"connected cameras={','.join(cameras)}", flush=True)
     start_time = time.monotonic()
     last_log_time = start_time
+
+    if args.quality:
+      stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": args.quality}}))
+      print(f"quality={args.quality}", flush=True)
 
     if args.stats:
       stats_task = asyncio.create_task(print_stats(stream, args.stats_interval))
@@ -123,6 +127,7 @@ def main() -> None:
   parser.add_argument("--duration", type=float, default=0.0, help="seconds to run; <=0 runs until disconnected")
   parser.add_argument("--log-interval", type=float, default=1.0, help="frame log interval in seconds")
   parser.add_argument("--messaging", action="store_true", help="create a WebRTC data channel")
+  parser.add_argument("--quality", choices=("low", "med", "high", "auto"), help="set livestream quality over the data channel")
   parser.add_argument("--stats", action="store_true", help="print periodic WebRTC stats")
   parser.add_argument("--stats-interval", type=float, default=2.0, help="WebRTC stats log interval in seconds")
   args = parser.parse_args()
