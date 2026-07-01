@@ -6,56 +6,11 @@ import json
 import os
 import time
 
-import aiortc
 import av
 import numpy as np
-import requests
 
 from msgq.visionipc import VisionIpcServer, VisionStreamType
-from teleoprtc import WebRTCOfferBuilder, StreamingOffer
-
-
-CAMERA_STREAMS = {
-  "road": VisionStreamType.VISION_STREAM_ROAD,
-  "driver": VisionStreamType.VISION_STREAM_DRIVER,
-  "wideRoad": VisionStreamType.VISION_STREAM_WIDE_ROAD,
-}
-
-
-class WebrtcdConnectionProvider:
-  def __init__(self, host: str, port: int, cameras: list[str], enabled: bool = True):
-    self.url = f"http://{host}:{port}/stream"
-    self.cameras = cameras
-    self.enabled = enabled
-
-  async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
-    body = {
-      "sdp": offer.sdp,
-      "init_camera": self.cameras[0],
-      "enabled": self.enabled,
-      "bridge_services_in": [],
-      "bridge_services_out": [],
-      "cameras": self.cameras,
-    }
-
-    def post_offer() -> dict:
-      resp = requests.post(self.url, json=body, timeout=10)
-      resp.raise_for_status()
-      return resp.json()
-
-    payload = await asyncio.to_thread(post_offer)
-    return aiortc.RTCSessionDescription(sdp=payload["sdp"], type=payload["type"])
-
-
-def parse_cameras(cameras_arg: str) -> list[str]:
-  cameras = [camera.strip() for camera in cameras_arg.split(",") if camera.strip()]
-  if not cameras:
-    raise ValueError("at least one camera is required")
-
-  unknown = sorted(set(cameras) - set(CAMERA_STREAMS))
-  if unknown:
-    raise ValueError(f"unknown cameras: {','.join(unknown)}")
-  return cameras
+from openpilot.tools.turbo.webrtc_client import CAMERA_STREAMS, build_offer, parse_cameras
 
 
 def frame_to_nv12(frame: av.VideoFrame) -> np.ndarray:
@@ -167,9 +122,7 @@ async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, d
 
 async def run(args: argparse.Namespace) -> None:
   cameras = parse_cameras(args.cameras)
-  builder = WebRTCOfferBuilder(WebrtcdConnectionProvider(args.host, args.port, cameras))
-  for camera in cameras:
-    builder.offer_to_receive_video_stream(camera)
+  builder = build_offer(args.host, args.port, cameras)
   if args.quality:
     builder.add_messaging()
 

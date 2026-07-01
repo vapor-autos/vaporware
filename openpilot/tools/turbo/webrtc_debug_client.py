@@ -7,41 +7,13 @@ import os
 import time
 from collections.abc import Mapping
 
-import aiortc
-import requests
-
-from teleoprtc import WebRTCOfferBuilder, StreamingOffer
+from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras
 
 
 def stat_dict(stat) -> dict:
   if dataclasses.is_dataclass(stat):
     return dataclasses.asdict(stat)
   return dict(getattr(stat, "__dict__", {}))
-
-
-class WebrtcdConnectionProvider:
-  def __init__(self, host: str, port: int, cameras: list[str], enabled: bool = True):
-    self.url = f"http://{host}:{port}/stream"
-    self.cameras = cameras
-    self.enabled = enabled
-
-  async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
-    body = {
-      "sdp": offer.sdp,
-      "init_camera": self.cameras[0],
-      "enabled": self.enabled,
-      "bridge_services_in": [],
-      "bridge_services_out": [],
-      "cameras": self.cameras,
-    }
-
-    def post_offer() -> dict:
-      resp = requests.post(self.url, json=body, timeout=10)
-      resp.raise_for_status()
-      return resp.json()
-
-    payload = await asyncio.to_thread(post_offer)
-    return aiortc.RTCSessionDescription(sdp=payload["sdp"], type=payload["type"])
 
 
 async def print_stats(stream, interval: float) -> None:
@@ -85,14 +57,9 @@ async def print_frame_counts(
 
 
 async def run(args: argparse.Namespace) -> None:
-  cameras = args.cameras.split(",") if args.cameras else [args.camera]
-  cameras = [camera.strip() for camera in cameras if camera.strip()]
-  if not cameras:
-    raise ValueError("at least one camera is required")
+  cameras = parse_cameras(args.cameras if args.cameras else args.camera)
 
-  builder = WebRTCOfferBuilder(WebrtcdConnectionProvider(args.host, args.port, cameras))
-  for camera in cameras:
-    builder.offer_to_receive_video_stream(camera)
+  builder = build_offer(args.host, args.port, cameras)
   if args.messaging or args.quality:
     builder.add_messaging()
 
