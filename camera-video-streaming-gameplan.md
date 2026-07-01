@@ -484,7 +484,7 @@ After LAN and direct-path tests pass, tune specifically for LTE:
 
 ## Near-Term Tasks
 
-1. Add a standalone `tools/turbo/webrtc_video_test.py` client that connects to UGV `webrtcd` and displays one camera.
+1. Add a standalone `tools/turbo/webrtc_debug_client.py` client that connects to UGV `webrtcd` and displays one camera.
 2. Confirm the `webrtcd` lifecycle on UGV with `UGV=true`: `camerad`, `stream_encoderd`, and `webrtcd` should all be running while started.
 3. Measure single-camera latency and CPU/GPU load against `compressed_vipc.py`.
 4. Extend `StreamRequestBody` and `webrtcd.StreamSession` for multiple fixed cameras.
@@ -505,7 +505,7 @@ Branch: `webrtc-vid`
 
 Completed:
 
-- added `openpilot/tools/turbo/webrtc_video_test.py`
+- added `openpilot/tools/turbo/webrtc_debug_client.py`
 - verified same-machine debug WebRTC server/client on GCS
 - verified real UGV H264 WebRTC over LAN
 - verified both `wideRoad` and `driver` single-camera sessions:
@@ -516,13 +516,13 @@ Completed:
   - `stream_encoderd`
   - `webrtcd`
 - added a GCS-side managed WebRTC receive/test process:
-  - `turbo_webrtc_video`
+  - `turbo_webrtc_vipc`
   - enabled when `GCS=True` and `TURBO_UGV_IP` is set
 - added multi-camera request/session support:
   - optional `StreamRequestBody.cameras`
   - `webrtcd.StreamSession` creates one video track per requested camera
   - existing `init_camera` single-camera behavior remains compatible
-- extended `webrtc_video_test.py` with `--cameras`
+- extended `webrtc_debug_client.py` with `--cameras`
 - verified one local debug WebRTC session carrying `wideRoad`, `driver`, and `road`
 - verified one real UGV WebRTC session carrying `wideRoad`, `driver`, and `road`
   - default/high quality stalls after a few seconds
@@ -557,7 +557,7 @@ Current WebRTC receive path:
 
 - `teleoprtc.WebRTCOfferBuilder` requests one or more incoming video tracks
 - incoming frames are `PyAV VideoFrame`s from aiortc
-- `webrtc_video_test.py` currently consumes one camera and prints frame stats
+- `webrtc_debug_client.py` consumes one or more cameras and prints frame stats
 - `webrtc_vipc.py` now consumes WebRTC tracks and republishes them into local VisionIPC
 
 Therefore there are two realistic UI approaches.
@@ -655,7 +655,7 @@ Recommended server change:
 
 Recommended client change:
 
-- update `webrtc_video_test.py` or add `webrtc_vipc.py` to request `--cameras wideRoad,driver,road`
+- update `webrtc_debug_client.py` or add `webrtc_vipc.py` to request `--cameras wideRoad,driver,road`
 - POST body should include both:
   - `init_camera`: first camera for compatibility
   - `cameras`: full list for new server
@@ -663,7 +663,7 @@ Recommended client change:
 ## Next Steps From Here
 
 1. Add multi-camera support to `StreamRequestBody` and `webrtcd.StreamSession`.
-2. Extend `webrtc_video_test.py` to request and consume multiple cameras in one session.
+2. Extend `webrtc_debug_client.py` to request and consume multiple cameras in one session.
 3. Verify one WebRTC session can carry `wideRoad`, `driver`, and `road` simultaneously over LAN.
 4. Build `openpilot/tools/turbo/webrtc_vipc.py`:
    - connect to UGV `webrtcd`
@@ -739,11 +739,11 @@ Do not extend teleoprtc until the existing direction proves the H264 video path 
 
 ### Minimal Code Changes
 
-#### 1. Add GCS WebRTC video test client
+#### 1. Add GCS WebRTC debug receive client
 
 New file:
 
-- `openpilot/tools/turbo/webrtc_video_test.py`
+- `openpilot/tools/turbo/webrtc_debug_client.py`
 
 Behavior:
 
@@ -773,7 +773,7 @@ stream = builder.stream()
 Before UGV testing:
 
 - run `openpilot.system.webrtc.webrtcd --debug` locally on a spare port
-- run `webrtc_video_test.py --host 127.0.0.1 --port <port> --camera wideRoad`
+- run `webrtc_debug_client.py --host 127.0.0.1 --port <port> --camera wideRoad`
 - verify signaling, connection setup, and frame receive loop
 
 This does not validate the H264 encoder path; it only validates the client and signaling flow.
@@ -799,7 +799,7 @@ Only after single camera works:
 
 - extend `StreamRequestBody` or add a Turbo-specific request field for multiple cameras
 - update `webrtcd.StreamSession` to add one `LiveStreamVideoStreamTrack` per requested camera
-- update `webrtc_video_test.py` to request `wideRoad` and `driver`
+- update `webrtc_debug_client.py` to request `wideRoad` and `driver`
 
 #### 5. GCS UI integration
 
@@ -824,7 +824,7 @@ Add only after manual scripts work:
 
 1. LAN single camera, no process manager:
    - start or verify UGV `webrtcd`
-   - run GCS `webrtc_video_test.py --camera wideRoad`
+   - run GCS `webrtc_debug_client.py --camera wideRoad`
    - verify frames arrive
 2. LAN dual camera:
    - extend server for multiple tracks
