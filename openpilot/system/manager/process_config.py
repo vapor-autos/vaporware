@@ -9,29 +9,6 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_IP = os.getenv("GCS_IP")
-TURBO_GCS_VIDEO_BACKEND = os.getenv("TURBO_GCS_VIDEO_BACKEND", "webrtc").lower()
-
-if TURBO_GCS_VIDEO_BACKEND not in ("vipc", "webrtc"):
-  raise ValueError("TURBO_GCS_VIDEO_BACKEND must be 'vipc' or 'webrtc'")
-
-TURBO_GCS_CAMERA_SERVICES = {
-  "0": "roadEncodeData",
-  "1": "driverEncodeData",
-  "2": "wideRoadEncodeData",
-}
-
-def turbo_gcs_camera_config() -> tuple[str, str]:
-  cams = [cam.strip() for cam in os.getenv("TURBO_GCS_CAMS", "1,2").split(",") if cam.strip()]
-  if not cams:
-    raise ValueError("TURBO_GCS_CAMS must include at least one camera")
-
-  invalid_cams = [cam for cam in cams if cam not in TURBO_GCS_CAMERA_SERVICES]
-  if invalid_cams:
-    raise ValueError(f"invalid TURBO_GCS_CAMS value(s): {','.join(invalid_cams)}")
-
-  return ",".join(cams), ",".join(TURBO_GCS_CAMERA_SERVICES[cam] for cam in cams)
-
-TURBO_GCS_CAMS, TURBO_GCS_CAMERA_SERVICE_LIST = turbo_gcs_camera_config()
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return ((started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")) or livestream(started, params, CP)
@@ -44,12 +21,6 @@ def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def gcs(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("GCS")
-
-def turbo_gcs_vipc(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return gcs(started, params, CP) and TURBO_GCS_VIDEO_BACKEND == "vipc"
-
-def turbo_gcs_webrtc(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return gcs(started, params, CP) and TURBO_GCS_VIDEO_BACKEND == "webrtc"
 
 def ugv(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("UGV")
@@ -162,14 +133,8 @@ procs = [
   # turbo gcs procs
   PythonProcess("g29d", "openpilot.tools.turbo.g29d", gcs, enabled=PC),
   NativeProcess("turbo_gcs_control_bridge", "openpilot/cereal/messaging", ["./bridge"], gcs, enabled=PC),
-  NativeProcess("turbo_gcs_bridge", "openpilot/cereal/messaging",
-                ["./bridge", TURBO_UGV_IP or "127.0.0.1", TURBO_GCS_CAMERA_SERVICE_LIST],
-                turbo_gcs_vipc, enabled=PC and TURBO_UGV_IP is not None),
-  NativeProcess("turbo_camerastream", "openpilot/tools/camerastream",
-                ["./compressed_vipc.py", "127.0.0.1", "--cams", TURBO_GCS_CAMS, "--silent"],
-                turbo_gcs_vipc, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
   PythonProcess("turbo_webrtc_vipc", "openpilot.tools.turbo.webrtc_vipc",
-                turbo_gcs_webrtc, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
+                gcs, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
   PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
   PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
 

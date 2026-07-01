@@ -66,6 +66,16 @@ def frame_to_nv12(frame: av.VideoFrame) -> np.ndarray:
   return np.hstack((y, uv))
 
 
+def new_perf_stats() -> dict[str, int]:
+  return {
+    "convert_ns": 0,
+    "convert_max_ns": 0,
+    "send_wait_ns": 0,
+    "send_ns": 0,
+    "send_max_ns": 0,
+  }
+
+
 async def print_stats(stream, interval: float) -> None:
   while stream.is_started:
     await asyncio.sleep(interval)
@@ -89,6 +99,7 @@ async def pump_camera(
   first_frame: av.VideoFrame,
   send_lock: asyncio.Lock,
   frame_counts: dict[str, int],
+  perf_stats: dict[str, dict[str, int]],
   end_time: float | None,
 ) -> None:
   stream_type = CAMERA_STREAMS[camera]
@@ -100,16 +111,30 @@ async def pump_camera(
 
     frame_id = frame_counts[camera]
     timestamp = time.monotonic_ns()
+    convert_start = time.monotonic_ns()
     img_yuv = frame_to_nv12(frame)
+    convert_ns = time.monotonic_ns() - convert_start
+
+    send_wait_start = time.monotonic_ns()
     async with send_lock:
+      send_start = time.monotonic_ns()
       vipc_server.send(stream_type, img_yuv.data, frame_id, timestamp, timestamp)
+      send_ns = time.monotonic_ns() - send_start
+
+    stats = perf_stats[camera]
+    stats["convert_ns"] += convert_ns
+    stats["convert_max_ns"] = max(stats["convert_max_ns"], convert_ns)
+    stats["send_wait_ns"] += send_start - send_wait_start
+    stats["send_ns"] += send_ns
+    stats["send_max_ns"] = max(stats["send_max_ns"], send_ns)
 
     frame_counts[camera] = frame_id + 1
     frame = None
 
 
-async def log_frame_counts(frame_counts: dict[str, int], interval: float) -> None:
+async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, dict[str, int]], interval: float) -> None:
   last_counts = frame_counts.copy()
+  last_perf_stats = {camera: stats.copy() for camera, stats in perf_stats.items()}
   last_time = time.monotonic()
   while True:
     await asyncio.sleep(interval)
@@ -117,9 +142,25 @@ async def log_frame_counts(frame_counts: dict[str, int], interval: float) -> Non
     elapsed = now - last_time
     fps_parts = []
     for camera, count in frame_counts.items():
-      fps = (count - last_counts[camera]) / elapsed
-      fps_parts.append(f"{camera}={fps:.1f}fps frames={count}")
+      delta_frames = count - last_counts[camera]
+      fps = delta_frames / elapsed
+      stats = perf_stats[camera]
+      last_stats = last_perf_stats[camera]
+      if delta_frames > 0:
+        convert_ms = (stats["convert_ns"] - last_stats["convert_ns"]) / delta_frames / 1e6
+        send_wait_ms = (stats["send_wait_ns"] - last_stats["send_wait_ns"]) / delta_frames / 1e6
+        send_ms = (stats["send_ns"] - last_stats["send_ns"]) / delta_frames / 1e6
+      else:
+        convert_ms = 0.0
+        send_wait_ms = 0.0
+        send_ms = 0.0
+      fps_parts.append(
+        f"{camera}={fps:.1f}fps frames={count} convert={convert_ms:.2f}ms "
+        f"convert_max={stats['convert_max_ns'] / 1e6:.2f}ms "
+        f"send_wait={send_wait_ms:.2f}ms send={send_ms:.2f}ms send_max={stats['send_max_ns'] / 1e6:.2f}ms"
+      )
       last_counts[camera] = count
+      last_perf_stats[camera] = stats.copy()
     print(" ".join(fps_parts), flush=True)
     last_time = now
 
@@ -164,12 +205,13 @@ async def run(args: argparse.Namespace) -> None:
 
     end_time = None if args.duration <= 0 else time.monotonic() + args.duration
     frame_counts = {camera: 0 for camera in cameras}
+    perf_stats = {camera: new_perf_stats() for camera in cameras}
     send_lock = asyncio.Lock()
     if args.log_interval > 0:
-      log_task = asyncio.create_task(log_frame_counts(frame_counts, args.log_interval))
+      log_task = asyncio.create_task(log_frame_counts(frame_counts, perf_stats, args.log_interval))
 
     camera_tasks = [
-      asyncio.create_task(pump_camera(camera, tracks[camera], vipc_server, first_frames[camera], send_lock, frame_counts, end_time))
+      asyncio.create_task(pump_camera(camera, tracks[camera], vipc_server, first_frames[camera], send_lock, frame_counts, perf_stats, end_time))
       for camera in cameras
     ]
     await asyncio.gather(*camera_tasks)

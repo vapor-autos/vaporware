@@ -261,7 +261,8 @@ class StreamSession:
     cameras = body.cameras if body.cameras else [body.init_camera]
     assert body.init_camera in cameras, "init_camera must be included in cameras"
     # aiortc polls each track from the event loop; this does not create one Python thread per camera.
-    # The track sockets are conflated, so backpressure drops stale encoded frames instead of queuing latency.
+    # Keep the encoded sockets conflated for teleop video: bounded backpressure here would preserve
+    # stale frames and grow latency when the network or GCS decoder falls behind.
     self.video_tracks = {
       camera: LiveStreamVideoStreamTrack(camera, self.enabled) if not debug_mode else VideoStreamTrack()
       for camera in cameras

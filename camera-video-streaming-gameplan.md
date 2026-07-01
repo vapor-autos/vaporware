@@ -432,19 +432,9 @@ Client implementation:
 
 ### Phase 3: Integrate With GCS UI
 
-Add a new GCS video source abstraction instead of hardcoding `CameraView("camerad", ...)` everywhere.
+Use a temporary WebRTC-to-VIPC adapter as the managed GCS camera path. It mimics `compressed_vipc.py` by publishing decoded WebRTC frames into the local `camerad` VisionIPC server, which lets `gcs_ui.py` keep using the existing `CameraView` rendering path. This adds one decode/copy stage, but it keeps the first integration small and directly testable.
 
-Candidate sources:
-
-- Existing source: VisionIPC via `compressed_vipc.py`
-- New source: WebRTC incoming tracks via teleoprtc
-
-Keep the current bridge/VIPC path as fallback behind an env or param:
-
-- `TURBO_GCS_VIDEO_BACKEND=vipc`
-- `TURBO_GCS_VIDEO_BACKEND=webrtc`
-
-For the first WebRTC UI pass, use a temporary WebRTC-to-VIPC adapter. It mimics `compressed_vipc.py` by publishing decoded WebRTC frames into the local `camerad` VisionIPC server, which lets `gcs_ui.py` keep using the existing `CameraView` rendering path. This adds one decode/copy stage, but it keeps the first integration small and directly testable.
+The old ZMQ camera bridge plus `compressed_vipc.py` path remains useful as a manual baseline, but it is no longer a process-config backend on this branch.
 
 ### Phase 4: Move Control/Messaging Onto WebRTC Data Channels
 
@@ -488,16 +478,14 @@ After LAN and direct-path tests pass, tune specifically for LTE:
 2. Confirm the `webrtcd` lifecycle on UGV with `UGV=true`: `camerad`, `stream_encoderd`, and `webrtcd` should all be running while started.
 3. Measure single-camera latency and CPU/GPU load against `compressed_vipc.py`.
 4. Extend `StreamRequestBody` and `webrtcd.StreamSession` for multiple fixed cameras.
-5. Add a GCS video backend switch and integrate WebRTC frames into `gcs_ui`.
+5. Run WebRTC-to-VIPC as the managed GCS camera path and keep `gcs_ui.py` consuming local `camerad` streams.
 6. Add configurable ICE host candidate selection for Tailscale/direct-interface tests.
 7. Build the connection-mode test matrix: LAN, ZMQ/VIPC, router port forward, Tailscale direct, Tailscale DERP, STUN, TURN.
 8. Only after video is solid, prototype `g29` over WebRTC data channel and remove one bridge from the test setup.
 
 ## Working Recommendation
 
-Do not delete the current `compressed_vipc.py` bridge path yet. It is simple, already supports simultaneous cameras, and matches the current GCS UI.
-
-The right next step is to prove direct UGV `webrtcd` with a one-camera teleoprtc GCS client, then extend the server to support multiple outgoing camera tracks. Once that works, the GCS UI can move from local VIPC camera views to WebRTC-backed camera views without losing the existing LAN fallback.
+Do not delete `compressed_vipc.py`; it is still useful as a manual LAN/high-quality baseline. For managed Turbo GCS camera video on this branch, use WebRTC.
 
 ## Progress Update: 2026-06-30
 
@@ -670,7 +658,7 @@ Recommended client change:
    - request all configured cameras
    - publish decoded frames to local `VisionIpcServer("camerad")`
 5. Change GCS process config:
-   - replace/disable `turbo_camerastream` when using WebRTC VIPC adapter
+   - remove managed ZMQ camera import and `compressed_vipc.py`
    - run `turbo_webrtc_vipc` under `GCS=True` and `TURBO_UGV_IP is not None`
 6. Keep `gcs_ui.py` unchanged initially and let it consume local VIPC from the adapter.
 7. After adapter works, decide whether to replace it with direct `WebRTCCameraView`.
@@ -689,13 +677,12 @@ Current step status:
   - road, driver, and wide road clients each received valid `1532160` byte frames
   - adapter held about `20 fps` per camera for the 25 second test
 - Step 5 is implemented locally:
-  - `TURBO_GCS_VIDEO_BACKEND=webrtc` is the default on this branch
-  - WebRTC mode runs `turbo_webrtc_vipc`
-  - WebRTC mode disables `turbo_gcs_bridge` camera import and `turbo_camerastream`
-  - `TURBO_GCS_VIDEO_BACKEND=vipc` keeps the old ZMQ bridge plus `compressed_vipc.py` path
+  - managed GCS camera video always runs `turbo_webrtc_vipc`
+  - removed the `TURBO_GCS_VIDEO_BACKEND` switch
+  - removed managed `turbo_gcs_bridge` camera import and `turbo_camerastream`
 - Step 5 process-config tests passed:
-  - default `webrtc` predicate starts only `turbo_webrtc_vipc`
-  - `vipc` predicate starts only `turbo_gcs_bridge` and `turbo_camerastream`
+  - GCS predicate starts `turbo_webrtc_vipc`
+  - UGV predicate still starts `stream_encoderd` and `webrtcd`
   - launching `turbo_webrtc_vipc` through `PythonProcess.start()` created local `camerad` VIPC streams for all three cameras
 - Step 6 is next: run the actual GCS UI against the WebRTC-backed local VIPC server and decide how to expose/select the third camera.
 
@@ -805,11 +792,11 @@ Only after single camera works:
 
 After multi-camera works:
 
-- integrate incoming WebRTC frames into `gcs_ui`
-- keep existing `CameraView("camerad", ...)` path behind `TURBO_GCS_VIDEO_BACKEND=vipc`
-- add `TURBO_GCS_VIDEO_BACKEND=webrtc`
+- run `turbo_webrtc_vipc` as the managed GCS camera source
+- keep existing `CameraView("camerad", ...)` path unchanged
+- use `compressed_vipc.py` only as a manual comparison path
 
-#### 6. Process config, disabled by default first
+#### 6. Process config
 
 File:
 
@@ -817,7 +804,7 @@ File:
 
 Add only after manual scripts work:
 
-- GCS process: WebRTC-backed GCS UI/client enabled by `GCS` and `TURBO_WEBRTC=1`
+- GCS process: WebRTC-to-VIPC adapter enabled by `GCS` and `TURBO_UGV_IP`
 - UGV already has `webrtcd` through existing `notCar`/UGV path; avoid adding a new UGV sender until the later inverted-connectivity design is needed
 
 #### 7. Minimal test order
@@ -834,7 +821,7 @@ Add only after manual scripts work:
 4. GCS UI integration:
    - either render frames directly from incoming tracks
    - or temporarily create a WebRTC-to-VIPC adapter if direct raylib integration takes longer
-5. Process manager integration behind `TURBO_WEBRTC=1`
+5. Process manager integration with WebRTC as the managed GCS camera source
 
 ### Non-Goals For First Branch
 
@@ -854,4 +841,4 @@ On Wi-Fi LAN:
 - UGV answers the offer and sends H264 `wideRoad` from `livestreamWideRoadEncodeData`
 - GCS receives decoded frames with stable FPS
 - no ZMQ camera bridge or `compressed_vipc.py` required for that test
-- existing Turbo ZMQ/VIPC path still works unchanged
+- existing Turbo control bridge still works unchanged
