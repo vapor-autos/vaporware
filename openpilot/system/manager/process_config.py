@@ -10,6 +10,10 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_IP = os.getenv("GCS_IP")
+TURBO_GCS_VIDEO_BACKEND = os.getenv("TURBO_GCS_VIDEO_BACKEND", "webrtc").lower()
+
+if TURBO_GCS_VIDEO_BACKEND not in ("vipc", "webrtc"):
+  raise ValueError("TURBO_GCS_VIDEO_BACKEND must be 'vipc' or 'webrtc'")
 
 TURBO_GCS_CAMERA_SERVICES = {
   "0": "roadEncodeData",
@@ -41,6 +45,12 @@ def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def gcs(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("GCS")
+
+def turbo_gcs_vipc(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return gcs(started, params, CP) and TURBO_GCS_VIDEO_BACKEND == "vipc"
+
+def turbo_gcs_webrtc(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return gcs(started, params, CP) and TURBO_GCS_VIDEO_BACKEND == "webrtc"
 
 def ugv(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("UGV")
@@ -155,14 +165,14 @@ procs = [
   NativeProcess("turbo_gcs_control_bridge", "openpilot/cereal/messaging", ["./bridge"], gcs, enabled=PC),
   NativeProcess("turbo_gcs_bridge", "openpilot/cereal/messaging",
                 ["./bridge", TURBO_UGV_IP or "127.0.0.1", TURBO_GCS_CAMERA_SERVICE_LIST],
-                gcs, enabled=PC and TURBO_UGV_IP is not None),
+                turbo_gcs_vipc, enabled=PC and TURBO_UGV_IP is not None),
   NativeProcess("turbo_camerastream", "openpilot/tools/camerastream",
                 ["./compressed_vipc.py", "127.0.0.1", "--cams", TURBO_GCS_CAMS, "--silent"],
-                gcs, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
+                turbo_gcs_vipc, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
+  PythonProcess("turbo_webrtc_vipc", "openpilot.tools.turbo.webrtc_vipc",
+                turbo_gcs_webrtc, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
   PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
   PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
-  PythonProcess("turbo_webrtc_video", "openpilot.tools.turbo.webrtc_video_test",
-                gcs, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
 
   # turbo ugv procs
   NativeProcess("turbo_ugv_camera_bridge", "openpilot/cereal/messaging", ["./bridge"],

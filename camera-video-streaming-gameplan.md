@@ -444,7 +444,7 @@ Keep the current bridge/VIPC path as fallback behind an env or param:
 - `TURBO_GCS_VIDEO_BACKEND=vipc`
 - `TURBO_GCS_VIDEO_BACKEND=webrtc`
 
-For the first WebRTC UI pass, avoid re-encoding back into VisionIPC unless needed. Decode incoming aiortc frames in the GCS process and upload them to the raylib texture path used by the UI. If that becomes invasive, a temporary WebRTC-to-VIPC adapter can mimic `compressed_vipc.py`, but that adds an extra decode/copy stage and partly defeats the transport cleanup.
+For the first WebRTC UI pass, use a temporary WebRTC-to-VIPC adapter. It mimics `compressed_vipc.py` by publishing decoded WebRTC frames into the local `camerad` VisionIPC server, which lets `gcs_ui.py` keep using the existing `CameraView` rendering path. This adds one decode/copy stage, but it keeps the first integration small and directly testable.
 
 ### Phase 4: Move Control/Messaging Onto WebRTC Data Channels
 
@@ -558,6 +558,7 @@ Current WebRTC receive path:
 - `teleoprtc.WebRTCOfferBuilder` requests one or more incoming video tracks
 - incoming frames are `PyAV VideoFrame`s from aiortc
 - `webrtc_video_test.py` currently consumes one camera and prints frame stats
+- `webrtc_vipc.py` now consumes WebRTC tracks and republishes them into local VisionIPC
 
 Therefore there are two realistic UI approaches.
 
@@ -678,7 +679,25 @@ Current step status:
 
 - Steps 1 and 2 are complete and committed.
 - Step 3 is functionally complete at `low` and `med` quality. High/default bitrate is too aggressive for all three streams and should not be the default for triple-camera GCS.
-- Step 4 is next.
+- Step 4 is implemented locally with `openpilot/tools/turbo/webrtc_vipc.py`.
+- Step 4 LAN test passed against the UGV:
+  - requested `wideRoad,driver,road` over one WebRTC session
+  - sent `quality=med`
+  - created local `VisionIpcServer("camerad")`
+  - published all three streams at `1344x760`
+  - local `VisionIpcClient` saw streams `{0, 1, 2}`
+  - road, driver, and wide road clients each received valid `1532160` byte frames
+  - adapter held about `20 fps` per camera for the 25 second test
+- Step 5 is implemented locally:
+  - `TURBO_GCS_VIDEO_BACKEND=webrtc` is the default on this branch
+  - WebRTC mode runs `turbo_webrtc_vipc`
+  - WebRTC mode disables `turbo_gcs_bridge` camera import and `turbo_camerastream`
+  - `TURBO_GCS_VIDEO_BACKEND=vipc` keeps the old ZMQ bridge plus `compressed_vipc.py` path
+- Step 5 process-config tests passed:
+  - default `webrtc` predicate starts only `turbo_webrtc_vipc`
+  - `vipc` predicate starts only `turbo_gcs_bridge` and `turbo_camerastream`
+  - launching `turbo_webrtc_vipc` through `PythonProcess.start()` created local `camerad` VIPC streams for all three cameras
+- Step 6 is next: run the actual GCS UI against the WebRTC-backed local VIPC server and decide how to expose/select the third camera.
 
 ## Concrete Next Branch Plan
 
