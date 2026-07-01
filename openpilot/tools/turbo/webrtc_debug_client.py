@@ -84,7 +84,7 @@ async def run(args: argparse.Namespace) -> None:
 
     tracks = {camera: stream.get_incoming_video_track(camera, buffered=False) for camera in cameras}
     end_time = None if args.duration <= 0 else start_time + args.duration
-    frame_counts = {camera: 0 for camera in cameras}
+    frame_counts = dict.fromkeys(cameras, 0)
     frame_sizes: dict[str, str] = {}
 
     if args.log_interval > 0:

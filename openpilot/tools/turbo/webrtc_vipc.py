@@ -116,11 +116,15 @@ async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, d
         convert_ms = 0.0
         send_wait_ms = 0.0
         send_ms = 0.0
-      fps_parts.append(
-        f"{camera}={fps:.1f}fps frames={count} convert={convert_ms:.2f}ms "
-        f"convert_max={stats['convert_max_ns'] / 1e6:.2f}ms "
-        f"send_wait={send_wait_ms:.2f}ms send={send_ms:.2f}ms send_max={stats['send_max_ns'] / 1e6:.2f}ms"
-      )
+      fps_parts.append(" ".join((
+        f"{camera}={fps:.1f}fps",
+        f"frames={count}",
+        f"convert={convert_ms:.2f}ms",
+        f"convert_max={stats['convert_max_ns'] / 1e6:.2f}ms",
+        f"send_wait={send_wait_ms:.2f}ms",
+        f"send={send_ms:.2f}ms",
+        f"send_max={stats['send_max_ns'] / 1e6:.2f}ms",
+      )))
       last_counts[camera] = count
       last_perf_stats[camera] = stats.copy()
     print(" ".join(fps_parts), flush=True)
@@ -164,7 +168,7 @@ async def run(args: argparse.Namespace) -> None:
     vipc_server.start_listener()
 
     end_time = None if args.duration <= 0 else time.monotonic() + args.duration
-    frame_counts = {camera: 0 for camera in cameras}
+    frame_counts = dict.fromkeys(cameras, 0)
     perf_stats = {camera: new_perf_stats() for camera in cameras}
     send_lock = asyncio.Lock()
     if args.log_interval > 0:
@@ -195,7 +199,12 @@ def main() -> None:
   parser.add_argument("--port", type=int, default=5001, help="UGV/webrtcd HTTP signaling port")
   parser.add_argument("--cameras", default=os.getenv("TURBO_GCS_WEBRTC_CAMS", "wideRoad,driver,road"), help="comma-separated cameras to request")
   parser.add_argument("--server", default="camerad", help="local VisionIPC server name")
-  parser.add_argument("--quality", choices=("low", "med", "high", "auto"), default=os.getenv("TURBO_GCS_WEBRTC_QUALITY", "med"), help="livestream quality sent over WebRTC data channel")
+  parser.add_argument(
+    "--quality",
+    choices=("low", "med", "high", "auto"),
+    default=os.getenv("TURBO_GCS_WEBRTC_QUALITY", "med"),
+    help="livestream quality sent over WebRTC data channel",
+  )
   parser.add_argument("--duration", type=float, default=0.0, help="seconds to run; <=0 runs until disconnected")
   parser.add_argument("--num-buffers", type=int, default=4, help="VisionIPC buffers per stream")
   parser.add_argument("--log-interval", type=float, default=1.0, help="frame log interval in seconds")
