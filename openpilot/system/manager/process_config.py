@@ -1,5 +1,4 @@
 import os
-import operator
 import platform
 
 from opendbc.car.structs import car
@@ -10,25 +9,6 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_IP = os.getenv("GCS_IP")
-
-TURBO_GCS_CAMERA_SERVICES = {
-  "0": "roadEncodeData",
-  "1": "driverEncodeData",
-  "2": "wideRoadEncodeData",
-}
-
-def turbo_gcs_camera_config() -> tuple[str, str]:
-  cams = [cam.strip() for cam in os.getenv("TURBO_GCS_CAMS", "1,2").split(",") if cam.strip()]
-  if not cams:
-    raise ValueError("TURBO_GCS_CAMS must include at least one camera")
-
-  invalid_cams = [cam for cam in cams if cam not in TURBO_GCS_CAMERA_SERVICES]
-  if invalid_cams:
-    raise ValueError(f"invalid TURBO_GCS_CAMS value(s): {','.join(invalid_cams)}")
-
-  return ",".join(cams), ",".join(TURBO_GCS_CAMERA_SERVICES[cam] for cam in cams)
-
-TURBO_GCS_CAMS, TURBO_GCS_CAMERA_SERVICE_LIST = turbo_gcs_camera_config()
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return ((started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")) or livestream(started, params, CP)
@@ -89,20 +69,20 @@ def livestream(started: bool, params: Params, CP: car.CarParams) -> bool:
   return params.get_bool("IsLiveStreaming") and not params.get_bool("GCS")
 
 def or_(*fns):
-  return lambda *args: operator.or_(*(fn(*args) for fn in fns))
+  return lambda *args: any(fn(*args) for fn in fns)
 
 def and_(*fns):
-  return lambda *args: operator.and_(*(fn(*args) for fn in fns))
+  return lambda *args: all(fn(*args) for fn in fns)
 
-def not_(*fns):
-  return lambda *args: operator.not_(*(fn(*args) for fn in fns))
+def not_(fn):
+  return lambda *args: not fn(*args)
 
 procs = [
   DaemonProcess("manage_athenad", "openpilot.system.athena.manage_athenad", "AthenadPid"),
 
   NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging),
   NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], only_onroad),
-  NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(and_(livestream, not_(iscar)), notcar)),
+  NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(and_(livestream, not_(iscar)), notcar, ugv)),
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
 
   NativeProcess("camerad", "openpilot/system/camerad", ["./camerad"], or_(driverview, livestream), enabled=not WEBCAM),
@@ -147,18 +127,14 @@ procs = [
 
   # debug procs
   NativeProcess("bridge", "openpilot/cereal/messaging", ["./bridge"], notcar),
-  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(and_(livestream, not_(iscar)), notcar)),
+  PythonProcess("webrtcd", "openpilot.system.webrtc.webrtcd", or_(and_(livestream, not_(iscar)), notcar, ugv)),
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 
   # turbo gcs procs
   PythonProcess("g29d", "openpilot.tools.turbo.g29d", gcs, enabled=PC),
   NativeProcess("turbo_gcs_control_bridge", "openpilot/cereal/messaging", ["./bridge"], gcs, enabled=PC),
-  NativeProcess("turbo_gcs_bridge", "openpilot/cereal/messaging",
-                ["./bridge", TURBO_UGV_IP or "127.0.0.1", TURBO_GCS_CAMERA_SERVICE_LIST],
-                gcs, enabled=PC and TURBO_UGV_IP is not None),
-  NativeProcess("turbo_camerastream", "openpilot/tools/camerastream",
-                ["./compressed_vipc.py", "127.0.0.1", "--cams", TURBO_GCS_CAMS, "--silent"],
-                gcs, enabled=PC and TURBO_UGV_IP is not None, sigkill=True),
+  PythonProcess("turbo_webrtc_vipc", "openpilot.tools.turbo.webrtc_vipc",
+                gcs, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
   PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
   PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
 
