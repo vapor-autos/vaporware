@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 import json
 import os
+import uuid
 
 import aiohttp.web
 import aiortc
@@ -15,7 +16,8 @@ from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
 
 class GcsAnswerProvider:
-  def __init__(self, cameras: list[str], enabled: bool = True):
+  def __init__(self, session_id: str, cameras: list[str], enabled: bool = True):
+    self.session_id = session_id
     self.cameras = cameras
     self.enabled = enabled
     self.offer_ready = asyncio.Event()
@@ -35,7 +37,7 @@ class GcsAnswerProvider:
 
   def set_answer(self, answer: dict) -> None:
     if self.answer_future.done():
-      raise RuntimeError("answer already received")
+      raise ValueError("answer already received")
     self.answer_future.set_result(aiortc.RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
 
 
@@ -43,7 +45,8 @@ class SignalingSession:
   def __init__(self, args: argparse.Namespace, cameras: list[str]):
     self.args = args
     self.cameras = cameras
-    self.provider = GcsAnswerProvider(cameras)
+    self.session_id = uuid.uuid4().hex
+    self.provider = GcsAnswerProvider(self.session_id, cameras)
     builder = WebRTCOfferBuilder(self.provider)
     for camera in cameras:
       builder.offer_to_receive_video_stream(camera)
@@ -56,7 +59,7 @@ class SignalingSession:
     try:
       await self.stream.start()
       await self.stream.wait_for_connection()
-      print(f"connected cameras={','.join(self.cameras)} server={self.args.server}", flush=True)
+      print(f"connected session={self.session_id} cameras={','.join(self.cameras)} server={self.args.server}", flush=True)
 
       if self.args.quality:
         self.stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": self.args.quality}}))
@@ -80,7 +83,6 @@ class SignalingSession:
           await asyncio.gather(stats_task, return_exceptions=True)
     except Exception as e:
       print(f"signaling session failed: {type(e).__name__}: {e}", flush=True)
-      raise
     finally:
       await self.stream.stop()
 
@@ -122,14 +124,32 @@ async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
   session = await state.get_session()
   await asyncio.wait_for(session.provider.offer_ready.wait(), timeout=10)
   assert session.provider.offer_body is not None
-  return aiohttp.web.json_response(asdict(session.provider.offer_body))
+  payload = asdict(session.provider.offer_body)
+  payload["session_id"] = session.session_id
+  return aiohttp.web.json_response(payload)
 
 
 async def handle_answer(request: aiohttp.web.Request) -> aiohttp.web.Response:
   state: SignalingState = request.app["state"]
   session = await state.get_session()
   payload = await request.json()
-  session.provider.set_answer(payload)
+  session_id = payload.get("session_id")
+  if session_id is not None and session_id != session.session_id:
+    return aiohttp.web.json_response({
+      "ok": False,
+      "reason": "stale_session",
+      "session_id": session.session_id,
+    }, status=409)
+
+  try:
+    session.provider.set_answer(payload)
+  except ValueError:
+    return aiohttp.web.json_response({
+      "ok": False,
+      "reason": "answer_already_received",
+      "session_id": session.session_id,
+    }, status=409)
+
   return aiohttp.web.json_response({"ok": True})
 
 
