@@ -20,6 +20,10 @@ class AnswerRejected(Exception):
   pass
 
 
+class OfferUnavailable(Exception):
+  pass
+
+
 def join_url(base_url: str, path: str) -> str:
   return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
@@ -27,6 +31,8 @@ def join_url(base_url: str, path: str) -> str:
 async def fetch_offer(base_url: str, timeout: float) -> Offer:
   def get_offer() -> dict:
     resp = requests.get(join_url(base_url, "/offer"), timeout=timeout)
+    if resp.status_code == 409:
+      raise OfferUnavailable(resp.text)
     resp.raise_for_status()
     return resp.json()
 

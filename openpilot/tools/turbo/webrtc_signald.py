@@ -124,6 +124,13 @@ async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
   session = await state.get_session()
   await asyncio.wait_for(session.provider.offer_ready.wait(), timeout=10)
   assert session.provider.offer_body is not None
+  if session.provider.answer_future.done():
+    return aiohttp.web.json_response({
+      "ok": False,
+      "reason": "session_active",
+      "session_id": session.session_id,
+    }, status=409)
+
   payload = asdict(session.provider.offer_body)
   payload["session_id"] = session.session_id
   return aiohttp.web.json_response(payload)
