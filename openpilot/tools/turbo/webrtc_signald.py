@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 from dataclasses import asdict
-import json
 import os
 import uuid
 
@@ -10,7 +9,7 @@ import aiohttp.web
 import aiortc
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
-from openpilot.tools.turbo.webrtc_client import parse_cameras
+from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
@@ -62,7 +61,7 @@ class SignalingSession:
       print(f"connected session={self.session_id} cameras={','.join(self.cameras)} server={self.args.server}", flush=True)
 
       if self.args.quality:
-        self.stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": self.args.quality}}))
+        send_livestream_quality(self.stream, self.args.quality)
         print(f"quality={self.args.quality}", flush=True)
 
       stats_task = None
@@ -122,7 +121,15 @@ async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
 async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
   state: SignalingState = request.app["state"]
   session = await state.get_session()
-  await asyncio.wait_for(session.provider.offer_ready.wait(), timeout=10)
+  try:
+    await asyncio.wait_for(session.provider.offer_ready.wait(), timeout=10)
+  except TimeoutError:
+    return aiohttp.web.json_response({
+      "ok": False,
+      "reason": "offer_unavailable",
+      "session_id": session.session_id,
+    }, status=503)
+
   assert session.provider.offer_body is not None
   if session.provider.answer_future.done():
     return aiohttp.web.json_response({

@@ -54,6 +54,8 @@ def candidate_dict(candidate) -> dict[str, Any]:
 
 
 def get_ice_transports(peer_connection) -> list:
+  # aiortc does not expose the selected ICE candidate pair through public stats in this version.
+  # Keep this as best-effort diagnostics for LTE/STUN testing.
   transports = getattr(peer_connection, "_RTCPeerConnection__iceTransports", None)
   if transports is None:
     return []

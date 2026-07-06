@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-import json
 import os
 
-from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras
+from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 
 
@@ -23,7 +22,7 @@ async def run(args: argparse.Namespace) -> None:
     print(f"connected cameras={','.join(cameras)} server={args.server}", flush=True)
 
     if args.quality:
-      stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": args.quality}}))
+      send_livestream_quality(stream, args.quality)
       print(f"quality={args.quality}", flush=True)
 
     if args.stats:
