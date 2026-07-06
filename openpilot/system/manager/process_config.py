@@ -148,8 +148,7 @@ procs = [
   NativeProcess("turbo_ugv_g29_bridge", "openpilot/cereal/messaging", ["./bridge", GCS_IP or "127.0.0.1", "g29"],
                 ugv, enabled=not PC and GCS_IP is not None),
   PythonProcess("turbo_webrtc_uplink", "openpilot.tools.turbo.webrtc_uplink",
-                ugv, enabled=not PC and GCS_SIGNALING_URL is not None, restart_if_crash=True,
-                args=["--signaling-url", GCS_SIGNALING_URL or "http://127.0.0.1:8443"]),
+                ugv, enabled=not PC and GCS_SIGNALING_URL is not None, restart_if_crash=True),
   PythonProcess("teleopd", "openpilot.tools.turbo.teleopd", ugv, enabled=not PC),
 ]
 

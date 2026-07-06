@@ -1,7 +1,6 @@
 import importlib
 import os
 import signal
-import sys
 import time
 import subprocess
 from collections.abc import Callable, ValuesView
@@ -19,11 +18,8 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
 
-def launcher(proc: str, name: str, args: list[str] | None = None) -> None:
+def launcher(proc: str, name: str) -> None:
   try:
-    if args is None:
-      args = []
-
     # import the process
     mod = importlib.import_module(proc)
 
@@ -38,7 +34,6 @@ def launcher(proc: str, name: str, args: list[str] | None = None) -> None:
     sentry.set_tag("daemon", name)
 
     # exec the process
-    sys.argv = [proc, *args]
     mod.main()
   except KeyboardInterrupt:
     cloudlog.warning(f"child {proc} got SIGINT")
@@ -174,10 +169,9 @@ class NativeProcess(ManagerProcess):
 
 
 class PythonProcess(ManagerProcess):
-  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_if_crash=False, args=None):
+  def __init__(self, name, module, should_run, enabled=True, sigkill=False, restart_if_crash=False):
     self.name = name
     self.module = module
-    self.args = [] if args is None else args
     self.should_run = should_run
     self.enabled = enabled
     self.sigkill = sigkill
@@ -198,7 +192,7 @@ class PythonProcess(ManagerProcess):
       return
 
     cloudlog.info(f"starting python {self.module}")
-    self.proc = Process(name=self.name, target=self.launcher, args=(self.module, self.name, self.args))
+    self.proc = Process(name=self.name, target=self.launcher, args=(self.module, self.name))
     self.proc.start()
     self.shutting_down = False
 
