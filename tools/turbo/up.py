@@ -2,7 +2,7 @@
 import sys
 
 from openpilot.common.params import Params
-from openpilot.system.hardware import PC, TICI
+from openpilot.common.hardware import PC, TICI
 
 
 def main() -> None:
