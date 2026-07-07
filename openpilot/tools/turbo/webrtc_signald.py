@@ -9,14 +9,16 @@ import aiortc
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
 
 class GcsAnswerProvider:
-  def __init__(self, session_id: str, cameras: list[str], enabled: bool = True):
+  def __init__(self, session_id: str, cameras: list[str], bridge_services_in: list[str], enabled: bool = True):
     self.session_id = session_id
     self.cameras = cameras
+    self.bridge_services_in = bridge_services_in
     self.enabled = enabled
     self.offer_ready = asyncio.Event()
     self.answer_future: asyncio.Future[aiortc.RTCSessionDescription] = asyncio.get_running_loop().create_future()
@@ -28,6 +30,7 @@ class GcsAnswerProvider:
       sdp=offer.sdp,
       init_camera=cameras[0],
       enabled=self.enabled,
+      bridge_services_in=self.bridge_services_in,
       cameras=cameras,
     )
     self.offer_ready.set()
@@ -43,12 +46,13 @@ class SignalingSession:
   def __init__(self, args: argparse.Namespace, cameras: list[str]):
     self.args = args
     self.cameras = cameras
+    self.control_services = parse_control_services(args.control_services)
     self.session_id = uuid.uuid4().hex
-    self.provider = GcsAnswerProvider(self.session_id, cameras)
+    self.provider = GcsAnswerProvider(self.session_id, cameras, self.control_services)
     builder = WebRTCOfferBuilder(self.provider)
     for camera in cameras:
       builder.offer_to_receive_video_stream(camera)
-    if args.quality:
+    if args.quality or self.control_services:
       builder.add_messaging()
     self.stream = builder.stream()
     self.task = asyncio.create_task(self.run())
@@ -64,7 +68,15 @@ class SignalingSession:
         print(f"quality={self.args.quality}", flush=True)
 
       stats_task = None
+      controls_task = None
       try:
+        if self.control_services:
+          controls_task = asyncio.create_task(CerealDataChannelSender(
+            self.control_services,
+            self.stream.get_messaging_channel(),
+            max_buffered_amount=self.args.control_max_buffered_amount,
+          ).run())
+          print(f"controls={','.join(self.control_services)}", flush=True)
         if self.args.stats:
           stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval))
         await publish_stream_to_vipc(
@@ -76,6 +88,9 @@ class SignalingSession:
           self.args.log_interval,
         )
       finally:
+        if controls_task is not None:
+          controls_task.cancel()
+          await asyncio.gather(controls_task, return_exceptions=True)
         if stats_task is not None:
           stats_task.cancel()
           await asyncio.gather(stats_task, return_exceptions=True)
@@ -203,6 +218,17 @@ def main() -> None:
   parser.add_argument("--port", type=int, default=int(os.getenv("GCS_SIGNALING_PORT", "8443")), help="HTTP signaling port")
   parser.add_argument("--cameras", default=os.getenv("TURBO_GCS_WEBRTC_CAMS", "wideRoad,driver,road"), help="comma-separated cameras to request")
   parser.add_argument("--server", default="camerad", help="local VisionIPC server name")
+  parser.add_argument(
+    "--control-services",
+    default=os.getenv("TURBO_GCS_WEBRTC_CONTROL_SERVICES", ""),
+    help="comma-separated local msgq services to send to the UGV over the WebRTC data channel",
+  )
+  parser.add_argument(
+    "--control-max-buffered-amount",
+    type=int,
+    default=int(os.getenv("TURBO_GCS_WEBRTC_CONTROL_MAX_BUFFERED_AMOUNT", "65536")),
+    help="skip control sends while the WebRTC data channel has more than this many buffered bytes; <=0 disables skipping",
+  )
   parser.add_argument(
     "--quality",
     choices=("low", "med", "high", "auto"),
