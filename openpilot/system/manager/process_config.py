@@ -9,6 +9,8 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_IP = os.getenv("GCS_IP")
+GCS_SIGNALING_PORT = os.getenv("GCS_SIGNALING_PORT")
+GCS_SIGNALING_URL = os.getenv("GCS_SIGNALING_URL")
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return ((started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")) or livestream(started, params, CP)
@@ -134,7 +136,9 @@ procs = [
   PythonProcess("g29d", "openpilot.tools.turbo.g29d", gcs, enabled=PC),
   NativeProcess("turbo_gcs_control_bridge", "openpilot/cereal/messaging", ["./bridge"], gcs, enabled=PC),
   PythonProcess("turbo_webrtc_vipc", "openpilot.tools.turbo.webrtc_vipc",
-                gcs, enabled=PC and TURBO_UGV_IP is not None, restart_if_crash=True),
+                gcs, enabled=PC and TURBO_UGV_IP is not None and GCS_SIGNALING_PORT is None, restart_if_crash=True),
+  PythonProcess("turbo_webrtc_signald", "openpilot.tools.turbo.webrtc_signald",
+                gcs, enabled=PC and GCS_SIGNALING_PORT is not None, restart_if_crash=True),
   PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
   PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
 
@@ -143,6 +147,8 @@ procs = [
                 ugv, enabled=not PC),
   NativeProcess("turbo_ugv_g29_bridge", "openpilot/cereal/messaging", ["./bridge", GCS_IP or "127.0.0.1", "g29"],
                 ugv, enabled=not PC and GCS_IP is not None),
+  PythonProcess("turbo_webrtc_uplink", "openpilot.tools.turbo.webrtc_uplink",
+                ugv, enabled=not PC and GCS_SIGNALING_URL is not None, restart_if_crash=True),
   PythonProcess("teleopd", "openpilot.tools.turbo.teleopd", ugv, enabled=not PC),
 ]
 

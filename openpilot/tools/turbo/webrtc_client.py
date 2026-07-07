@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import asdict
+import json
 
 import aiortc
 import requests
@@ -50,3 +51,8 @@ def build_offer(host: str, port: int, cameras: list[str]) -> WebRTCOfferBuilder:
   for camera in cameras:
     builder.offer_to_receive_video_stream(camera)
   return builder
+
+
+def send_livestream_quality(stream, quality: str | None) -> None:
+  if quality:
+    stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": quality}}))
