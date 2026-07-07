@@ -74,6 +74,7 @@ class SignalingSession:
           controls_task = asyncio.create_task(CerealDataChannelSender(
             self.control_services,
             self.stream.get_messaging_channel(),
+            max_buffered_amount=self.args.control_max_buffered_amount,
           ).run())
           print(f"controls={','.join(self.control_services)}", flush=True)
         if self.args.stats:
@@ -221,6 +222,12 @@ def main() -> None:
     "--control-services",
     default=os.getenv("TURBO_GCS_WEBRTC_CONTROL_SERVICES", ""),
     help="comma-separated local msgq services to send to the UGV over the WebRTC data channel",
+  )
+  parser.add_argument(
+    "--control-max-buffered-amount",
+    type=int,
+    default=int(os.getenv("TURBO_GCS_WEBRTC_CONTROL_MAX_BUFFERED_AMOUNT", "65536")),
+    help="skip control sends while the WebRTC data channel has more than this many buffered bytes; <=0 disables skipping",
   )
   parser.add_argument(
     "--quality",
