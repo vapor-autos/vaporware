@@ -28,7 +28,7 @@ import aioice.ice
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
-from openpilot.tools.turbo.modem_stats_logger import read_modem_stats
+from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
