@@ -14,6 +14,13 @@ from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_str
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 class GcsAnswerProvider:
   def __init__(self, session_id: str, cameras: list[str], bridge_services_in: list[str], enabled: bool = True):
     self.session_id = session_id
@@ -78,7 +85,7 @@ class SignalingSession:
           ).run())
           print(f"controls={','.join(self.control_services)}", flush=True)
         if self.args.stats:
-          stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval))
+          stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval, self.args.stats_file))
         await publish_stream_to_vipc(
           self.stream,
           self.cameras,
@@ -216,7 +223,7 @@ def main() -> None:
   parser = argparse.ArgumentParser(description="GCS signaling server for UGV-outbound WebRTC video")
   parser.add_argument("--host", default=os.getenv("GCS_SIGNALING_HOST", "0.0.0.0"), help="host to listen on")
   parser.add_argument("--port", type=int, default=int(os.getenv("GCS_SIGNALING_PORT", "8443")), help="HTTP signaling port")
-  parser.add_argument("--cameras", default=os.getenv("TURBO_GCS_WEBRTC_CAMS", "wideRoad,driver,road"), help="comma-separated cameras to request")
+  parser.add_argument("--cameras", default=os.getenv("TURBO_GCS_WEBRTC_CAMS", "wideRoad,driver"), help="comma-separated cameras to request")
   parser.add_argument("--server", default="camerad", help="local VisionIPC server name")
   parser.add_argument(
     "--control-services",
@@ -238,8 +245,23 @@ def main() -> None:
   parser.add_argument("--duration", type=float, default=0.0, help="seconds to run per session; <=0 runs until disconnected")
   parser.add_argument("--num-buffers", type=int, default=4, help="VisionIPC buffers per stream")
   parser.add_argument("--log-interval", type=float, default=1.0, help="frame log interval in seconds")
-  parser.add_argument("--stats", action="store_true", help="print periodic WebRTC stats")
-  parser.add_argument("--stats-interval", type=float, default=2.0, help="WebRTC stats log interval in seconds")
+  parser.add_argument(
+    "--stats",
+    action="store_true",
+    default=env_bool("TURBO_GCS_WEBRTC_STATS"),
+    help="print periodic WebRTC stats",
+  )
+  parser.add_argument(
+    "--stats-interval",
+    type=float,
+    default=float(os.getenv("TURBO_GCS_WEBRTC_STATS_INTERVAL", "2.0")),
+    help="WebRTC stats log interval in seconds",
+  )
+  parser.add_argument(
+    "--stats-file",
+    default=os.getenv("TURBO_GCS_WEBRTC_STATS_FILE"),
+    help="optional JSONL file for periodic WebRTC stats",
+  )
   args = parser.parse_args()
 
   asyncio.run(run(args))
