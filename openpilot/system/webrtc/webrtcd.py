@@ -28,6 +28,7 @@ import aioice.ice
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
+from openpilot.tools.turbo.modem_stats_logger import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
@@ -254,6 +255,7 @@ class WebRTCStatsLogger(AsyncTaskRunner):
     self.last_outbound: dict[str, dict[str, int]] = {}
     self.stats_file = os.getenv("WEBRTCD_STATS_FILE") or default_metrics_jsonl_path("ugv_webrtcd")
     self.latest_file = os.getenv("WEBRTCD_STATS_LATEST_FILE") or default_latest_json_path("ugv_webrtcd")
+    self.modem_file = os.getenv("TURBO_MODEM_SOURCE_FILE", "/dev/shm/modem")
 
   async def run(self):
     while True:
@@ -309,7 +311,11 @@ class WebRTCStatsLogger(AsyncTaskRunner):
           }
 
       if any(summary.values()):
-        write_metrics_payload({"webrtcd_stats": summary}, self.stats_file, self.latest_file)
+        payload: dict[str, Any] = {"webrtcd_stats": summary}
+        modem_stats = read_modem_stats(self.modem_file)
+        if modem_stats is not None:
+          payload["modem_stats"] = modem_stats
+        write_metrics_payload(payload, self.stats_file, self.latest_file)
 
 
 class StreamSession:
