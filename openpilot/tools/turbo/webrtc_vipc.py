@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras, send_livestream_quality
-from openpilot.tools.turbo.teleop_metrics import env_bool
+from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 
 
@@ -68,12 +68,12 @@ def main() -> None:
   )
   parser.add_argument(
     "--stats-file",
-    default=os.getenv("TURBO_GCS_WEBRTC_STATS_FILE"),
+    default=os.getenv("TURBO_GCS_WEBRTC_STATS_FILE") or default_metrics_jsonl_path("gcs_webrtc"),
     help="optional JSONL file for periodic WebRTC stats",
   )
   parser.add_argument(
     "--stats-latest-file",
-    default=os.getenv("TURBO_GCS_WEBRTC_STATS_LATEST_FILE", "/tmp/gcs_webrtc_latest.json"),
+    default=os.getenv("TURBO_GCS_WEBRTC_STATS_LATEST_FILE") or default_latest_json_path("gcs_webrtc"),
     help="optional JSON file for the latest WebRTC stats snapshot",
   )
   args = parser.parse_args()

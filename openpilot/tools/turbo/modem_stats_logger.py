@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any
 
-from openpilot.tools.turbo.teleop_metrics import parse_serving_cell_extra, write_metrics_payload
+from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, parse_serving_cell_extra, write_metrics_payload
 
 
 def read_modem_stats(path: str) -> dict[str, Any] | None:
@@ -35,10 +35,10 @@ def main() -> None:
   parser = argparse.ArgumentParser(description="Log Turbo teleop modem/RF metrics")
   parser.add_argument("--modem-file", default=os.getenv("TURBO_MODEM_SOURCE_FILE", "/dev/shm/modem"), help="modem JSON source file")
   parser.add_argument("--interval", type=float, default=float(os.getenv("TURBO_MODEM_STATS_INTERVAL", "2.0")), help="sample interval in seconds")
-  parser.add_argument("--stats-file", default=os.getenv("TURBO_MODEM_STATS_FILE", "/tmp/turbo_modem_stats.jsonl"), help="output JSONL file")
+  parser.add_argument("--stats-file", default=os.getenv("TURBO_MODEM_STATS_FILE") or default_metrics_jsonl_path("ugv_modem"), help="output JSONL file")
   parser.add_argument(
     "--latest-file",
-    default=os.getenv("TURBO_MODEM_STATS_LATEST_FILE", "/tmp/turbo_modem_latest.json"),
+    default=os.getenv("TURBO_MODEM_STATS_LATEST_FILE") or default_latest_json_path("ugv_modem"),
     help="latest modem stats JSON file",
   )
   args = parser.parse_args()
