@@ -1,6 +1,5 @@
 import asyncio
 import dataclasses
-import json
 import time
 from typing import Any
 import weakref
@@ -9,6 +8,7 @@ import av
 import numpy as np
 
 from msgq.visionipc import VisionIpcServer, VisionStreamType
+from openpilot.tools.turbo.teleop_metrics import write_metrics_payload
 
 
 CAMERA_STREAMS = {
@@ -71,14 +71,6 @@ def stat_dict(stat) -> dict:
   return dict(getattr(stat, "__dict__", {}))
 
 
-def write_stats_line(payload: dict[str, Any], stats_file: str | None) -> None:
-  line = json.dumps(payload, default=str, sort_keys=True)
-  print(line, flush=True)
-  if stats_file:
-    with open(stats_file, "a") as f:
-      f.write(line + "\n")
-
-
 def candidate_dict(candidate) -> dict[str, Any]:
   return {
     "host": getattr(candidate, "host", None),
@@ -133,7 +125,7 @@ def ice_summary(peer_connection) -> list[dict[str, Any]]:
   return [ice_transport_summary(transport) for transport in get_ice_transports(peer_connection)]
 
 
-async def print_stats(stream, interval: float, stats_file: str | None = None) -> None:
+async def print_stats(stream, interval: float, stats_file: str | None = None, latest_file: str | None = None) -> None:
   install_rtcp_feedback_counters()
   last_ice_payload = None
   last_inbound: dict[str, dict[str, int]] = {}
@@ -223,11 +215,11 @@ async def print_stats(stream, interval: float, stats_file: str | None = None) ->
           "packetsSent": stat.packetsSent,
         }
     if summary:
-      write_stats_line({"stats": summary}, stats_file)
+      write_metrics_payload({"stats": summary}, stats_file, latest_file)
 
     ice_payload = ice_summary(stream.peer_connection)
     if ice_payload and ice_payload != last_ice_payload:
-      write_stats_line({"ice": ice_payload}, stats_file)
+      write_metrics_payload({"ice": ice_payload}, stats_file, latest_file)
       last_ice_payload = ice_payload
 
 

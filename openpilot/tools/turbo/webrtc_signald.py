@@ -8,17 +8,11 @@ import aiohttp.web
 import aiortc
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
+from openpilot.tools.turbo.teleop_metrics import env_bool
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
-
-
-def env_bool(name: str, default: bool = False) -> bool:
-  value = os.getenv(name)
-  if value is None:
-    return default
-  return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 class GcsAnswerProvider:
@@ -85,7 +79,7 @@ class SignalingSession:
           ).run())
           print(f"controls={','.join(self.control_services)}", flush=True)
         if self.args.stats:
-          stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval, self.args.stats_file))
+          stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval, self.args.stats_file, self.args.stats_latest_file))
         await publish_stream_to_vipc(
           self.stream,
           self.cameras,
@@ -261,6 +255,11 @@ def main() -> None:
     "--stats-file",
     default=os.getenv("TURBO_GCS_WEBRTC_STATS_FILE"),
     help="optional JSONL file for periodic WebRTC stats",
+  )
+  parser.add_argument(
+    "--stats-latest-file",
+    default=os.getenv("TURBO_GCS_WEBRTC_STATS_LATEST_FILE", "/tmp/gcs_webrtc_latest.json"),
+    help="optional JSON file for the latest WebRTC stats snapshot",
   )
   args = parser.parse_args()
 
