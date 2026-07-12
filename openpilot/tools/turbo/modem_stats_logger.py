@@ -35,7 +35,11 @@ def main() -> None:
   parser = argparse.ArgumentParser(description="Log Turbo teleop modem/RF metrics")
   parser.add_argument("--modem-file", default=os.getenv("TURBO_MODEM_SOURCE_FILE", "/dev/shm/modem"), help="modem JSON source file")
   parser.add_argument("--interval", type=float, default=float(os.getenv("TURBO_MODEM_STATS_INTERVAL", "2.0")), help="sample interval in seconds")
-  parser.add_argument("--stats-file", default=os.getenv("TURBO_MODEM_STATS_FILE") or default_metrics_jsonl_path("ugv_modem"), help="output JSONL file")
+  parser.add_argument(
+    "--stats-file",
+    default=os.getenv("TURBO_MODEM_STATS_FILE") or default_metrics_jsonl_path("ugv_modem", wait_for_time=True),
+    help="output JSONL file",
+  )
   parser.add_argument(
     "--latest-file",
     default=os.getenv("TURBO_MODEM_STATS_LATEST_FILE") or default_latest_json_path("ugv_modem"),

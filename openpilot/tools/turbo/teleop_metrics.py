@@ -1,10 +1,16 @@
 import json
 import os
+import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 
+from openpilot.common.params import Params
+from openpilot.common.time_helpers import system_time_valid
+
 
 DEFAULT_METRICS_DIR = "/tmp/turbo-metrics"
+RUN_ID_MAX_LEN = 96
 
 
 def _ensure_dir(path: str) -> str:
@@ -12,10 +18,64 @@ def _ensure_dir(path: str) -> str:
   return path
 
 
-def default_metrics_jsonl_path(name: str) -> str:
+def _safe_filename_token(value: str, max_len: int = RUN_ID_MAX_LEN) -> str:
+  safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+  return safe[:max_len] or "unknown"
+
+
+def _boot_id() -> str:
+  try:
+    with open("/proc/sys/kernel/random/boot_id") as f:
+      return f.read().strip().split("-", 1)[0]
+  except FileNotFoundError:
+    return "no_boot_id"
+
+
+def current_route() -> str | None:
+  try:
+    return Params().get("CurrentRoute")
+  except Exception:
+    return None
+
+
+def metrics_run_id() -> str:
+  return os.getenv("TURBO_METRICS_RUN_ID") or current_route() or f"boot_{_boot_id()}"
+
+
+def wait_for_valid_time(timeout: float) -> bool:
+  end = time.monotonic() + max(0.0, timeout)
+  while not system_time_valid():
+    if time.monotonic() >= end:
+      return False
+    time.sleep(0.25)
+  return True
+
+
+def _timestamp_token(wait_for_time: bool = False, timeout: float | None = None) -> str:
+  if wait_for_time:
+    wait_for_valid_time(timeout if timeout is not None else float(os.getenv("TURBO_METRICS_TIME_SYNC_TIMEOUT", "60.0")))
+
+  if system_time_valid():
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+  return f"unsynced_{time.monotonic_ns()}"
+
+
+def metrics_metadata() -> dict[str, Any]:
+  valid_time = system_time_valid()
+  return {
+    "monotonic_time": time.monotonic(),
+    "time_valid": valid_time,
+    "utc_time": datetime.now(UTC).isoformat() if valid_time else None,
+    "run_id": metrics_run_id(),
+    "route": current_route(),
+  }
+
+
+def default_metrics_jsonl_path(name: str, wait_for_time: bool = False, timeout: float | None = None) -> str:
   metrics_dir = _ensure_dir(os.getenv("TURBO_METRICS_DIR", DEFAULT_METRICS_DIR))
-  timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-  return os.path.join(metrics_dir, f"{timestamp}_{name}_{os.getpid()}.jsonl")
+  timestamp = _timestamp_token(wait_for_time, timeout)
+  run_id = _safe_filename_token(metrics_run_id())
+  return os.path.join(metrics_dir, f"{timestamp}_{run_id}_{name}_{os.getpid()}.jsonl")
 
 
 def default_latest_json_path(name: str) -> str:
@@ -43,6 +103,7 @@ def append_jsonl(path: str, payload: dict[str, Any]) -> None:
 
 
 def write_metrics_payload(payload: dict[str, Any], jsonl_file: str | None = None, latest_file: str | None = None, print_line: bool = True) -> None:
+  payload = {**payload, "metrics_meta": metrics_metadata()}
   line = json.dumps(payload, default=str, sort_keys=True)
   if print_line:
     print(line, flush=True)
