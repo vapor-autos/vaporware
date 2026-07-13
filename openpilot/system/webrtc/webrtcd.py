@@ -28,6 +28,8 @@ import aioice.ice
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
+from openpilot.tools.turbo.modem_stats import read_modem_stats
+from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -166,7 +168,7 @@ class DynamicPubMaster(messaging.PubMaster):
 
 
 class LivestreamBitrateController(AsyncTaskRunner):
-  bitrates = [750_000, 1_500_000, int(os.environ.get("STREAM_BITRATE", 5_000_000))]
+  bitrates = [500_000, 1_500_000, int(os.environ.get("STREAM_BITRATE", 5_000_000))]
   label_to_bitrate = { "high": bitrates[2], "med": bitrates[1], "low": bitrates[0]}
   sample_interval = 0.2
   high_level = 0.1 # drop immediately
@@ -244,6 +246,78 @@ class LivestreamBitrateController(AsyncTaskRunner):
       self._auto = True
 
 
+class WebRTCStatsLogger(AsyncTaskRunner):
+  def __init__(self, peer_connection: Any, interval: float, enabled: bool = True):
+    super().__init__()
+    self.pc = peer_connection
+    self.interval = interval
+    self._enabled = enabled
+    self.last_outbound: dict[str, dict[str, int]] = {}
+    self.stats_file = os.getenv("WEBRTCD_STATS_FILE") or default_metrics_jsonl_path("ugv_webrtcd")
+    self.latest_file = os.getenv("WEBRTCD_STATS_LATEST_FILE") or default_latest_json_path("ugv_webrtcd")
+    self.modem_file = os.getenv("TURBO_MODEM_SOURCE_FILE", "/dev/shm/modem")
+
+  async def run(self):
+    while True:
+      await asyncio.sleep(self.interval)
+      if not self._enabled:
+        continue
+
+      report = await self.pc.getStats()
+      senders = self.pc.getSenders()
+      sender_labels = {
+        f"outbound-rtp_{id(sender)}": getattr(getattr(sender, "track", None), "id", None) or f"sender_{index}"
+        for index, sender in enumerate(senders)
+      }
+
+      summary: dict[str, Any] = {"outbound": {}, "remote_inbound": {}, "transport": {}}
+      for stat in report.values():
+        if stat.type == "outbound-rtp":
+          previous = self.last_outbound.get(stat.id, {})
+          packets_sent_delta = stat.packetsSent - previous.get("packetsSent", stat.packetsSent)
+          bytes_sent_delta = stat.bytesSent - previous.get("bytesSent", stat.bytesSent)
+          summary["outbound"][sender_labels.get(stat.id, stat.id)] = {
+            "ssrc": stat.ssrc,
+            "kind": stat.kind,
+            "packets_sent": stat.packetsSent,
+            "packets_sent_delta": packets_sent_delta,
+            "bytes_sent": stat.bytesSent,
+            "bytes_sent_delta": bytes_sent_delta,
+            "tx_kbps": bytes_sent_delta * 8 / self.interval / 1000.0,
+          }
+          self.last_outbound[stat.id] = {
+            "packetsSent": stat.packetsSent,
+            "bytesSent": stat.bytesSent,
+          }
+        elif stat.type == "remote-inbound-rtp":
+          summary["remote_inbound"][stat.id] = {
+            "ssrc": stat.ssrc,
+            "kind": stat.kind,
+            "packets_lost": stat.packetsLost,
+            "fraction_lost": stat.fractionLost,
+            "jitter_rtp": stat.jitter,
+            "jitter_ms": (stat.jitter / 90.0) if stat.kind == "video" else None,
+            "round_trip_time_s": stat.roundTripTime,
+            "round_trip_time_ms": (stat.roundTripTime * 1000.0) if stat.roundTripTime is not None else None,
+          }
+        elif stat.type == "transport":
+          summary["transport"][stat.id] = {
+            "bytes_sent": stat.bytesSent,
+            "bytes_received": stat.bytesReceived,
+            "packets_sent": stat.packetsSent,
+            "packets_received": stat.packetsReceived,
+            "ice_role": stat.iceRole,
+            "dtls_state": stat.dtlsState,
+          }
+
+      if any(summary.values()):
+        payload: dict[str, Any] = {"webrtcd_stats": summary}
+        modem_stats = read_modem_stats(self.modem_file)
+        if modem_stats is not None:
+          payload["modem_stats"] = modem_stats
+        write_metrics_payload(payload, self.stats_file, self.latest_file)
+
+
 class StreamSession:
   shared_pub_master = DynamicPubMaster([])
 
@@ -276,11 +350,18 @@ class StreamSession:
     self.incoming_bridge_services = body.bridge_services_in
     self.outgoing_bridge: CerealOutgoingMessageProxy | None = None
     self.bitrate_controller: LivestreamBitrateController | None = None
+    self.stats_logger: WebRTCStatsLogger | None = None
     if len(body.bridge_services_in) > 0:
       self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
     if len(body.bridge_services_out) > 0:
       self.outgoing_bridge = CerealOutgoingMessageProxy(body.bridge_services_out, self.enabled)
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
+    if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
+      self.stats_logger = WebRTCStatsLogger(
+        self.stream.peer_connection,
+        float(os.getenv("WEBRTCD_STATS_INTERVAL", "2.0")),
+        self.enabled,
+      )
 
     self.run_task: asyncio.Task | None = None
     self._cleanup_lock = asyncio.Lock()
@@ -357,6 +438,8 @@ class StreamSession:
           self.outgoing_bridge.add_channel(channel)
           self.outgoing_bridge.start()
       self.bitrate_controller.start()
+      if self.stats_logger is not None:
+        self.stats_logger.start()
 
       self.logger.info("Stream session (%s) connected", self.identifier)
       await self.stream.wait_for_disconnection()
@@ -372,6 +455,8 @@ class StreamSession:
         return
       self._cleanup_done = True
       self.params.put("LivestreamRequestKeyframe", False)
+      if self.stats_logger is not None:
+        await self.stats_logger.stop()
       await self.bitrate_controller.stop()
       if self.outgoing_bridge is not None:
         await self.outgoing_bridge.stop()

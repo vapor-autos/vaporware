@@ -1,13 +1,14 @@
 import asyncio
 import dataclasses
-import json
 import time
 from typing import Any
+import weakref
 
 import av
 import numpy as np
 
 from msgq.visionipc import VisionIpcServer, VisionStreamType
+from openpilot.tools.turbo.teleop_metrics import write_metrics_payload
 
 
 CAMERA_STREAMS = {
@@ -15,6 +16,35 @@ CAMERA_STREAMS = {
   "driver": VisionStreamType.VISION_STREAM_DRIVER,
   "wideRoad": VisionStreamType.VISION_STREAM_WIDE_ROAD,
 }
+
+_RTCP_FEEDBACK_COUNTERS: weakref.WeakKeyDictionary[Any, dict[str, int]] = weakref.WeakKeyDictionary()
+_RTCP_COUNTERS_INSTALLED = False
+
+
+def install_rtcp_feedback_counters() -> None:
+  global _RTCP_COUNTERS_INSTALLED
+  if _RTCP_COUNTERS_INSTALLED:
+    return
+
+  from aiortc.rtcrtpreceiver import RTCRtpReceiver
+
+  original_nack = RTCRtpReceiver._send_rtcp_nack
+  original_pli = RTCRtpReceiver._send_rtcp_pli
+
+  async def counted_nack(self, media_ssrc: int, lost: list[int]) -> None:
+    counters = _RTCP_FEEDBACK_COUNTERS.setdefault(self, {"nack_requests": 0, "nack_packets": 0, "pli": 0})
+    counters["nack_requests"] += 1
+    counters["nack_packets"] += len(lost)
+    await original_nack(self, media_ssrc, lost)
+
+  async def counted_pli(self, media_ssrc: int) -> None:
+    counters = _RTCP_FEEDBACK_COUNTERS.setdefault(self, {"nack_requests": 0, "nack_packets": 0, "pli": 0})
+    counters["pli"] += 1
+    await original_pli(self, media_ssrc)
+
+  RTCRtpReceiver._send_rtcp_nack = counted_nack
+  RTCRtpReceiver._send_rtcp_pli = counted_pli
+  _RTCP_COUNTERS_INSTALLED = True
 
 
 def frame_to_nv12(frame: av.VideoFrame) -> np.ndarray:
@@ -95,21 +125,101 @@ def ice_summary(peer_connection) -> list[dict[str, Any]]:
   return [ice_transport_summary(transport) for transport in get_ice_transports(peer_connection)]
 
 
-async def print_stats(stream, interval: float) -> None:
+async def print_stats(stream, interval: float, stats_file: str | None = None, latest_file: str | None = None) -> None:
+  install_rtcp_feedback_counters()
   last_ice_payload = None
+  last_inbound: dict[str, dict[str, int]] = {}
+  last_transport: dict[str, dict[str, int]] = {}
+  last_feedback: dict[int, dict[str, int]] = {}
+
   while stream.is_started:
     await asyncio.sleep(interval)
     report = await stream.peer_connection.getStats()
-    summary = {}
+
+    receivers = stream.peer_connection.getReceivers()
+    receiver_by_stats_id = {f"inbound-rtp_{id(receiver)}": receiver for receiver in receivers}
+    receiver_labels = {
+      id(receiver): getattr(getattr(receiver, "track", None), "id", None) or f"receiver_{index}"
+      for index, receiver in enumerate(receivers)
+    }
+
+    summary: dict[str, Any] = {
+      "inbound": {},
+      "remote_outbound": {},
+      "transport": {},
+    }
     for stat in report.values():
-      if stat.type in ("inbound-rtp", "remote-outbound-rtp", "transport"):
-        summary[f"{stat.type}:{stat.id}"] = stat_dict(stat)
+      if stat.type == "inbound-rtp":
+        receiver = receiver_by_stats_id.get(stat.id)
+        label = receiver_labels.get(id(receiver), stat.id) if receiver is not None else stat.id
+        previous = last_inbound.get(stat.id, {})
+        packets_received_delta = stat.packetsReceived - previous.get("packetsReceived", stat.packetsReceived)
+        packets_lost_delta = max(0, stat.packetsLost - previous.get("packetsLost", stat.packetsLost))
+        lost_total = stat.packetsReceived + stat.packetsLost
+        lost_delta_total = packets_received_delta + packets_lost_delta
+        payload = {
+          "ssrc": stat.ssrc,
+          "kind": stat.kind,
+          "packets_received": stat.packetsReceived,
+          "packets_received_delta": packets_received_delta,
+          "packets_lost": stat.packetsLost,
+          "packets_lost_delta": packets_lost_delta,
+          "packet_loss_pct": (stat.packetsLost / lost_total * 100.0) if lost_total > 0 else 0.0,
+          "packet_loss_delta_pct": (packets_lost_delta / lost_delta_total * 100.0) if lost_delta_total > 0 else 0.0,
+          "jitter_rtp": stat.jitter,
+          "jitter_ms": (stat.jitter / 90.0) if stat.kind == "video" else None,
+        }
+        if receiver is not None:
+          counters = _RTCP_FEEDBACK_COUNTERS.get(receiver, {})
+          previous_feedback = last_feedback.get(id(receiver), {})
+          payload.update({
+            "nack_requests": counters.get("nack_requests", 0),
+            "nack_requests_delta": counters.get("nack_requests", 0) - previous_feedback.get("nack_requests", counters.get("nack_requests", 0)),
+            "nack_packets": counters.get("nack_packets", 0),
+            "nack_packets_delta": counters.get("nack_packets", 0) - previous_feedback.get("nack_packets", counters.get("nack_packets", 0)),
+            "pli": counters.get("pli", 0),
+            "pli_delta": counters.get("pli", 0) - previous_feedback.get("pli", counters.get("pli", 0)),
+          })
+          last_feedback[id(receiver)] = counters.copy()
+        summary["inbound"][label] = payload
+        last_inbound[stat.id] = {
+          "packetsReceived": stat.packetsReceived,
+          "packetsLost": stat.packetsLost,
+        }
+      elif stat.type == "remote-outbound-rtp":
+        summary["remote_outbound"][stat.id] = stat_dict(stat)
+      elif stat.type == "transport":
+        previous = last_transport.get(stat.id, {})
+        bytes_received_delta = stat.bytesReceived - previous.get("bytesReceived", stat.bytesReceived)
+        bytes_sent_delta = stat.bytesSent - previous.get("bytesSent", stat.bytesSent)
+        packets_received_delta = stat.packetsReceived - previous.get("packetsReceived", stat.packetsReceived)
+        packets_sent_delta = stat.packetsSent - previous.get("packetsSent", stat.packetsSent)
+        summary["transport"][stat.id] = {
+          "bytes_received": stat.bytesReceived,
+          "bytes_received_delta": bytes_received_delta,
+          "rx_kbps": bytes_received_delta * 8 / interval / 1000.0,
+          "bytes_sent": stat.bytesSent,
+          "bytes_sent_delta": bytes_sent_delta,
+          "tx_kbps": bytes_sent_delta * 8 / interval / 1000.0,
+          "packets_received": stat.packetsReceived,
+          "packets_received_delta": packets_received_delta,
+          "packets_sent": stat.packetsSent,
+          "packets_sent_delta": packets_sent_delta,
+          "ice_role": stat.iceRole,
+          "dtls_state": stat.dtlsState,
+        }
+        last_transport[stat.id] = {
+          "bytesReceived": stat.bytesReceived,
+          "bytesSent": stat.bytesSent,
+          "packetsReceived": stat.packetsReceived,
+          "packetsSent": stat.packetsSent,
+        }
     if summary:
-      print(json.dumps({"stats": summary}, default=str, sort_keys=True), flush=True)
+      write_metrics_payload({"stats": summary}, stats_file, latest_file)
 
     ice_payload = ice_summary(stream.peer_connection)
     if ice_payload and ice_payload != last_ice_payload:
-      print(json.dumps({"ice": ice_payload}, default=str, sort_keys=True), flush=True)
+      write_metrics_payload({"ice": ice_payload}, stats_file, latest_file)
       last_ice_payload = ice_payload
 
 
