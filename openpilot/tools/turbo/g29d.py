@@ -41,7 +41,7 @@ def _run(sock) -> None:
   try:
     g29 = G29()
     g29.set_range(400)
-    g29.set_autocenter(0.25, 0.25)
+    g29.set_autocenter(ccw_proportion=0.25, cw_proportion=0.25, force=0.3)
     g29.listen()
 
     while True:
