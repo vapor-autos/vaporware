@@ -168,7 +168,7 @@ class DynamicPubMaster(messaging.PubMaster):
 
 
 class LivestreamBitrateController(AsyncTaskRunner):
-  bitrates = [1_000_000, 1_500_000, int(os.environ.get("STREAM_BITRATE", 5_000_000))]
+  bitrates = [500_000, 1_500_000, int(os.environ.get("STREAM_BITRATE", 5_000_000))]
   label_to_bitrate = { "high": bitrates[2], "med": bitrates[1], "low": bitrates[0]}
   sample_interval = 0.2
   high_level = 0.1 # drop immediately
