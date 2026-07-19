@@ -4,6 +4,23 @@ import time
 import openpilot.cereal.messaging as messaging
 
 RETRY_DELAY = 2.0
+PUBLISH_INTERVAL = 0.02
+LOG_INTERVAL_FRAMES = 50
+
+TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
+TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
+
+
+def _clip(value: float, lo: float, hi: float) -> float:
+  return min(max(value, lo), hi)
+
+
+def _accelerator_pedal(accelerator: float) -> float:
+  return (_clip(accelerator, -1.0, 1.0) + 1.0) / 2.0
+
+
+def _accelerator_to_simulated_velocity_m_s(accelerator: float, max_velocity_m_s: float) -> float:
+  return _accelerator_pedal(accelerator) * max(0.0, max_velocity_m_s)
 
 
 def _dial_delta(events: list[dict]) -> int:
@@ -34,6 +51,15 @@ def _publish_state(sock, state: dict, events: list[dict]) -> None:
   sock.send(msg.to_bytes())
 
 
+def _make_torque_controller(g29):
+  from g29py.advanced import SteeringTorqueConfig, SteeringTorqueController
+
+  config = SteeringTorqueConfig(
+    force_response_velocity_m_s=TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S,
+  )
+  return SteeringTorqueController(g29, config=config)
+
+
 def _run(sock) -> None:
   from g29py import G29
 
@@ -41,12 +67,39 @@ def _run(sock) -> None:
   try:
     g29 = G29()
     g29.set_range(400)
-    g29.set_autocenter(ccw_proportion=0.25, cw_proportion=0.25, force=0.3)
+    torque_controller = _make_torque_controller(g29)
     g29.listen()
 
+    print(
+      "g29d torque_sim enabled "
+      f"pedal_speed=True "
+      f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s "
+      f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
+      flush=True,
+    )
+
+    frame = 0
     while True:
-      time.sleep(0.02)
-      _publish_state(sock, g29.get_state(), g29.get_events())
+      time.sleep(PUBLISH_INTERVAL)
+      state = g29.get_state()
+      events = g29.get_events()
+
+      velocity = _accelerator_to_simulated_velocity_m_s(state["accelerator"], TORQUE_SIM_MAX_VELOCITY_M_S)
+      command = torque_controller.update(longitudinal_velocity_m_s=velocity, steering=state["steering"])
+      if frame % LOG_INTERVAL_FRAMES == 0:
+        print(
+          "g29d torque_sim "
+          f"velocity={velocity:.2f}m/s "
+          f"factor={command.speed_factor:.2f} "
+          f"force_factor={command.force_factor:.2f} "
+          f"target={command.target_position:.3f} "
+          f"force={command.force:.2f} "
+          f"friction={command.friction:.2f}",
+          flush=True,
+        )
+
+      _publish_state(sock, state, events)
+      frame += 1
   finally:
     if g29 is not None:
       g29.force_off()
