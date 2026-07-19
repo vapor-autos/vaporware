@@ -80,7 +80,7 @@ dependencies = [
   "pillow",
 
   # turbo
-  "g29py==0.0.15",
+  "g29py==0.0.16",
 ]
 
 [project.optional-dependencies]

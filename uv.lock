@@ -358,14 +358,14 @@ wheels = [
 
 [[package]]
 name = "g29py"
-version = "0.0.15"
+version = "0.0.16"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hidapi" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/65/5587c1a865731fd89290ab99f80040304ea589c5e5c2f0aef322e11fdea6/g29py-0.0.15.tar.gz", hash = "sha256:920f030a7b4386c0962695c570f644d87631dd820d7fd87354d0f85ddc23b9cd", size = 6780, upload-time = "2026-05-31T02:32:26.181Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/c1/0dd976304c24f9c0827a77431779fbf4c5d65c388be08cd05fd5fdba202d/g29py-0.0.16.tar.gz", hash = "sha256:e940d9d77d45119631340836053d493d0d18616adf0cd375002c86d4a2ba41ca", size = 7671, upload-time = "2026-07-19T20:04:26.102Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/71/4ceb347cfab417d75bd23d0009bc720a12f0f8210888960df7947ea36b86/g29py-0.0.15-py3-none-any.whl", hash = "sha256:f1246ba390be1e425755efe5cea7c12fde2ec8f0fa2197103df12f0e172d49a4", size = 7917, upload-time = "2026-05-31T02:32:27.067Z" },
+    { url = "https://files.pythonhosted.org/packages/73/d8/903320ccbfdbd0d2be8cbd0f91631f9bbd7475cfb7888fd081fd59dc905e/g29py-0.0.16-py3-none-any.whl", hash = "sha256:0b07abeac4c94f107488355515448fdc75d13615b530aed80550231bbec60da3", size = 9269, upload-time = "2026-07-19T20:04:27.033Z" },
 ]
 
 [[package]]
@@ -738,7 +738,7 @@ requires-dist = [
     { name = "cython" },
     { name = "eigen", git = "https://github.com/commaai/dependencies.git?subdirectory=eigen&rev=release-eigen" },
     { name = "ffmpeg", git = "https://github.com/commaai/dependencies.git?subdirectory=ffmpeg&rev=release-ffmpeg" },
-    { name = "g29py", specifier = "==0.0.15" },
+    { name = "g29py", specifier = "==0.0.16" },
     { name = "gcc-arm-none-eabi", git = "https://github.com/commaai/dependencies.git?subdirectory=gcc-arm-none-eabi&rev=release-gcc-arm-none-eabi" },
     { name = "git-lfs", git = "https://github.com/commaai/dependencies.git?subdirectory=git-lfs&rev=release-git-lfs" },
     { name = "hypothesis", marker = "extra == 'testing'", specifier = "==6.47.*" },
