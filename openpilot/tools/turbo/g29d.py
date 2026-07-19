@@ -71,10 +71,12 @@ def _run(sock) -> None:
     g29.listen()
 
     print(
-      "g29d torque_sim enabled "
-      f"pedal_speed=True "
-      f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s "
-      f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
+      " ".join((
+        "g29d torque_sim enabled",
+        "pedal_speed=True",
+        f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
+        f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
+      )),
       flush=True,
     )
 
@@ -88,13 +90,15 @@ def _run(sock) -> None:
       command = torque_controller.update(longitudinal_velocity_m_s=velocity, steering=state["steering"])
       if frame % LOG_INTERVAL_FRAMES == 0:
         print(
-          "g29d torque_sim "
-          f"velocity={velocity:.2f}m/s "
-          f"factor={command.speed_factor:.2f} "
-          f"force_factor={command.force_factor:.2f} "
-          f"target={command.target_position:.3f} "
-          f"force={command.force:.2f} "
-          f"friction={command.friction:.2f}",
+          " ".join((
+            "g29d torque_sim",
+            f"velocity={velocity:.2f}m/s",
+            f"factor={command.speed_factor:.2f}",
+            f"force_factor={command.force_factor:.2f}",
+            f"target={command.target_position:.3f}",
+            f"force={command.force:.2f}",
+            f"friction={command.friction:.2f}",
+          )),
           flush=True,
         )
 
