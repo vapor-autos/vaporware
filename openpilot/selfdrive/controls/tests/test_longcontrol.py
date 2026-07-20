@@ -45,7 +45,9 @@ class TestLongControlStateTransition:
     assert next_state == LongCtrlState.pid
 
   def test_starting(self):
-    CP = car.CarParams.new_message(startingState=True, vEgoStarting=0.5)
+    CP = car.CarParams.new_message()
+    CP.deprecated.startingState = True
+    CP.deprecated.vEgoStarting = 0.5
     active = True
     current_state = LongCtrlState.starting
     next_state = long_control_state_trans(CP, active, current_state, v_ego=0.1,

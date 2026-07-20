@@ -461,7 +461,12 @@ CONFIGS = [
     proc_name="card",
     pubs=["pandaStates", "carControl", "onroadEvents", "can"],
     subs=["sendcan", "carState", "carParams", "carOutput", "liveTracks"],
-    ignore=["logMonoTime", "carState.cumLagMs"],
+    ignore=[
+      "logMonoTime", "carState.cumLagMs",
+      "carParams.deprecated.startAccel",
+      "carParams.deprecated.startingState",
+      "carParams.deprecated.vEgoStarting",
+    ],
     init_callback=card_fingerprint_callback,
     should_recv_callback=card_rcv_callback,
     tolerance=NUMPY_TOLERANCE,

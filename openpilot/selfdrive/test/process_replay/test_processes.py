@@ -63,8 +63,9 @@ segments = [
   ("TESLA", "2c912ca5de3b1ee9|0000025d--6eb6bcbca4--4"),
 ]
 
-# dashcamOnly makes don't need to be tested until a full port is done
-excluded_interfaces = ["mock", "body", "psa"]
+# dashcamOnly makes don't need to be tested until a full port is done.
+# Turbo is a UGV control target without a process replay route fixture.
+excluded_interfaces = ["mock", "body", "psa", "turbo"]
 
 BASE_URL = "https://raw.githubusercontent.com/commaai/ci-artifacts/refs/heads/process-replay/"
 REF_COMMIT_FN = os.path.join(PROC_REPLAY_DIR, "ref_commit")

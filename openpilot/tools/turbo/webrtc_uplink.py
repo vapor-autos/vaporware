@@ -27,9 +27,9 @@ def join_url(base_url: str, path: str) -> str:
   return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-async def fetch_offer(base_url: str, timeout: float) -> Offer:
+async def fetch_offer(base_url: str, request_timeout: float) -> Offer:
   def get_offer() -> dict:
-    resp = requests.get(join_url(base_url, "/offer"), timeout=timeout)
+    resp = requests.get(join_url(base_url, "/offer"), timeout=request_timeout)
     if resp.status_code == 409:
       raise OfferUnavailable(resp.text)
     resp.raise_for_status()
@@ -40,12 +40,12 @@ async def fetch_offer(base_url: str, timeout: float) -> Offer:
   return Offer(StreamRequestBody(**payload), session_id)
 
 
-async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, answer_type: str, timeout: float) -> None:
+async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, answer_type: str, request_timeout: float) -> None:
   def send_answer() -> None:
     payload = {"sdp": answer_sdp, "type": answer_type}
     if session_id is not None:
       payload["session_id"] = session_id
-    resp = requests.post(join_url(base_url, "/answer"), json=payload, timeout=timeout)
+    resp = requests.post(join_url(base_url, "/answer"), json=payload, timeout=request_timeout)
     if resp.status_code == 409:
       raise AnswerRejected(resp.text)
     resp.raise_for_status()

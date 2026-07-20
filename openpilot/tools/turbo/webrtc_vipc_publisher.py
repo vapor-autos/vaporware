@@ -5,6 +5,7 @@ from typing import Any
 import weakref
 
 import av
+import av.video.format
 import numpy as np
 
 from msgq.visionipc import VisionIpcServer, VisionStreamType
@@ -42,8 +43,10 @@ def install_rtcp_feedback_counters() -> None:
     counters["pli"] += 1
     await original_pli(self, media_ssrc)
 
-  RTCRtpReceiver._send_rtcp_nack = counted_nack
-  RTCRtpReceiver._send_rtcp_pli = counted_pli
+  nack_attr = "_send_rtcp_nack"
+  pli_attr = "_send_rtcp_pli"
+  setattr(RTCRtpReceiver, nack_attr, counted_nack)
+  setattr(RTCRtpReceiver, pli_attr, counted_pli)
   _RTCP_COUNTERS_INSTALLED = True
 
 
