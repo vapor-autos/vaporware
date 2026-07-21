@@ -52,9 +52,8 @@ class CerealDataChannelSender:
     self.max_observed_buffered_amount = 0
 
   def buffered_amount(self) -> int:
-    buffered_amount = getattr(self.channel, "buffered_amount", None)
-    if callable(buffered_amount):
-      return int(buffered_amount())
+    # libdatachannel-py 2026.1.0.dev2 has been observed to segfault when
+    # querying DataChannel.buffered_amount() during live sessions.
     return int(getattr(self.channel, "bufferedAmount", 0))
 
   def channel_open(self) -> bool:

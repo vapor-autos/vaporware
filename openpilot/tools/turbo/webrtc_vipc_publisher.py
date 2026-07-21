@@ -68,6 +68,8 @@ class H264FrameReceiver:
       try:
         data = await asyncio.wait_for(self._queue.get(), timeout=self._keyframe_retry_interval)
       except TimeoutError:
+        if not self._track.is_open():
+          raise ConnectionError("video track closed before decoded frame was available") from None
         self.request_keyframe()
         continue
       try:
@@ -108,9 +110,10 @@ def call_optional(obj, name: str):
 
 
 def data_channel_summary(channel) -> dict[str, Any]:
+  # Avoid DataChannel.buffered_amount(); libdatachannel-py 2026.1.0.dev2 can
+  # segfault when it is queried from the Python stats loop.
   return {
     "open": call_optional(channel, "is_open"),
-    "buffered_amount": call_optional(channel, "buffered_amount"),
   }
 
 

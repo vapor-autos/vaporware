@@ -64,17 +64,17 @@ def test_gcs_answer_provider_returns_teleoprtc_description():
   asyncio.run(run_test())
 
 
-def test_data_channel_sender_reads_libdatachannel_buffered_amount():
+def test_data_channel_sender_avoids_libdatachannel_buffered_amount():
   class Channel:
     def buffered_amount(self):
-      return 123
+      raise AssertionError("libdatachannel buffered_amount should not be queried")
 
     def is_open(self):
       return False
 
   sender = CerealDataChannelSender(["customReservedRawData0"], Channel())
 
-  assert sender.buffered_amount() == 123
+  assert sender.buffered_amount() == 0
   assert not sender.channel_open()
 
 
