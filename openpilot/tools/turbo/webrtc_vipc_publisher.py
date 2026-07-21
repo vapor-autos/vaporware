@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import dataclasses
+import os
 import time
 from typing import Any
 
@@ -145,6 +146,7 @@ async def pump_camera(
   frame_counts: dict[str, int],
   perf_stats: dict[str, dict[str, int]],
   end_time: float | None,
+  send_timeout: float,
 ) -> None:
   stream_type = CAMERA_STREAMS[camera]
   frame: DecodedVideoFrame | None = first_frame
@@ -162,7 +164,7 @@ async def pump_camera(
     send_wait_start = time.monotonic_ns()
     async with send_lock:
       send_start = time.monotonic_ns()
-      vipc_server.send(stream_type, frame.data.data, frame_id, timestamp, timestamp)
+      await send_vipc_frame(vipc_server, stream_type, frame, frame_id, timestamp, camera, send_timeout)
       send_ns = time.monotonic_ns() - send_start
 
     stats = perf_stats[camera]
@@ -174,6 +176,27 @@ async def pump_camera(
 
     frame_counts[camera] = frame_id + 1
     frame = None
+
+
+async def send_vipc_frame(
+  vipc_server: VisionIpcServer,
+  stream_type: VisionStreamType,
+  frame: DecodedVideoFrame,
+  frame_id: int,
+  timestamp: int,
+  camera: str,
+  send_timeout: float,
+) -> None:
+  send = asyncio.to_thread(vipc_server.send, stream_type, frame.data.data, frame_id, timestamp, timestamp)
+  if send_timeout <= 0:
+    await send
+    return
+
+  try:
+    await asyncio.wait_for(send, timeout=send_timeout)
+  except TimeoutError:
+    print(f"fatal: vipc send blocked camera={camera} timeout={send_timeout:g}s; restarting turbo_webrtc_signald", flush=True)
+    os._exit(1)
 
 
 async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, dict[str, int]], interval: float) -> None:
@@ -220,6 +243,7 @@ async def publish_stream_to_vipc(
   num_buffers: int,
   duration: float,
   log_interval: float,
+  send_timeout: float | None = None,
 ) -> None:
   receivers = {
     camera: H264FrameReceiver(stream.get_incoming_video_track(camera))
@@ -245,12 +269,24 @@ async def publish_stream_to_vipc(
     frame_counts = dict.fromkeys(cameras, 0)
     perf_stats = {camera: new_perf_stats() for camera in cameras}
     send_lock = asyncio.Lock()
+    if send_timeout is None:
+      send_timeout = float(os.getenv("TURBO_GCS_VIPC_SEND_TIMEOUT", "0.5"))
 
     if log_interval > 0:
       log_task = asyncio.create_task(log_frame_counts(frame_counts, perf_stats, log_interval))
 
     camera_tasks = [
-      asyncio.create_task(pump_camera(camera, receivers[camera], vipc_server, first_frames[camera], send_lock, frame_counts, perf_stats, end_time))
+      asyncio.create_task(pump_camera(
+        camera,
+        receivers[camera],
+        vipc_server,
+        first_frames[camera],
+        send_lock,
+        frame_counts,
+        perf_stats,
+        end_time,
+        send_timeout,
+      ))
       for camera in cameras
     ]
     await asyncio.gather(*camera_tasks)
