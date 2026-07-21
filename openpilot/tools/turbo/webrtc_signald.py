@@ -5,7 +5,6 @@ import os
 import uuid
 
 import aiohttp.web
-import aiortc
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
@@ -13,6 +12,7 @@ from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_q
 from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
+from teleoprtc.stream import RTCSessionDescription
 
 
 class GcsAnswerProvider:
@@ -22,10 +22,10 @@ class GcsAnswerProvider:
     self.bridge_services_in = bridge_services_in
     self.enabled = enabled
     self.offer_ready = asyncio.Event()
-    self.answer_future: asyncio.Future[aiortc.RTCSessionDescription] = asyncio.get_running_loop().create_future()
+    self.answer_future: asyncio.Future[RTCSessionDescription] = asyncio.get_running_loop().create_future()
     self.offer_body: StreamRequestBody | None = None
 
-  async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
+  async def __call__(self, offer: StreamingOffer) -> RTCSessionDescription:
     cameras = offer.video if offer.video else self.cameras
     self.offer_body = StreamRequestBody(
       sdp=offer.sdp,
@@ -40,7 +40,7 @@ class GcsAnswerProvider:
   def set_answer(self, answer: dict) -> None:
     if self.answer_future.done():
       raise ValueError("answer already received")
-    self.answer_future.set_result(aiortc.RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
+    self.answer_future.set_result(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
 
 
 class SignalingSession:

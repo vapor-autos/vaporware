@@ -1,12 +1,12 @@
 import argparse
 import asyncio
 import dataclasses
-import json
 import os
 import time
 from collections.abc import Mapping
 
-from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras
+from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras, send_livestream_quality
+from openpilot.tools.turbo.webrtc_vipc_publisher import H264FrameReceiver
 
 
 def stat_dict(stat) -> dict:
@@ -18,18 +18,23 @@ def stat_dict(stat) -> dict:
 async def print_stats(stream, interval: float) -> None:
   while stream.is_started:
     await asyncio.sleep(interval)
-    report = await stream.peer_connection.getStats()
-    summary = {}
-    for stat in report.values():
-      if stat.type in ("inbound-rtp", "remote-outbound-rtp", "transport", "candidate-pair"):
-        summary[f"{stat.type}:{stat.id}"] = stat_dict(stat)
-    if summary:
-      print(json.dumps({"stats": summary}, default=str, sort_keys=True), flush=True)
+    reports = {
+      camera: stat_dict(report)
+      for camera, report in stream.get_receiver_report_stats().items()
+    }
+    state = stream.peer_connection.state()
+    print({"connection": getattr(state, "name", str(state)), "receiver_reports": reports}, flush=True)
 
 
-async def receive_camera(camera: str, track, frame_counts: dict[str, int], frame_sizes: dict[str, str], end_time: float | None) -> None:
+async def receive_camera(
+  camera: str,
+  receiver: H264FrameReceiver,
+  frame_counts: dict[str, int],
+  frame_sizes: dict[str, str],
+  end_time: float | None,
+) -> None:
   while end_time is None or time.monotonic() < end_time:
-    frame = await track.recv()
+    frame = await receiver.recv()
     frame_counts[camera] += 1
     frame_sizes[camera] = f"{frame.width}x{frame.height}"
 
@@ -66,6 +71,7 @@ async def run(args: argparse.Namespace) -> None:
   stats_task = None
   log_task = None
   camera_tasks = []
+  receivers: dict[str, H264FrameReceiver] = {}
   start_time = 0.0
 
   try:
@@ -75,13 +81,16 @@ async def run(args: argparse.Namespace) -> None:
     start_time = time.monotonic()
 
     if args.quality:
-      stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": args.quality}}))
+      send_livestream_quality(stream, args.quality)
       print(f"quality={args.quality}", flush=True)
 
     if args.stats:
       stats_task = asyncio.create_task(print_stats(stream, args.stats_interval))
 
-    tracks = {camera: stream.get_incoming_video_track(camera, buffered=False) for camera in cameras}
+    receivers = {
+      camera: H264FrameReceiver(stream.get_incoming_video_track(camera))
+      for camera in cameras
+    }
     end_time = None if args.duration <= 0 else start_time + args.duration
     frame_counts = dict.fromkeys(cameras, 0)
     frame_sizes: dict[str, str] = {}
@@ -90,7 +99,7 @@ async def run(args: argparse.Namespace) -> None:
       log_task = asyncio.create_task(print_frame_counts(frame_counts, frame_sizes, args.log_interval))
 
     camera_tasks = [
-      asyncio.create_task(receive_camera(camera, tracks[camera], frame_counts, frame_sizes, end_time))
+      asyncio.create_task(receive_camera(camera, receivers[camera], frame_counts, frame_sizes, end_time))
       for camera in cameras
     ]
     await asyncio.gather(*camera_tasks)
@@ -109,6 +118,8 @@ async def run(args: argparse.Namespace) -> None:
     pending = [task for task in [*camera_tasks, log_task, stats_task] if task is not None]
     if pending:
       await asyncio.gather(*pending, return_exceptions=True)
+    for receiver in receivers.values():
+      receiver.close()
     await stream.stop()
 
 

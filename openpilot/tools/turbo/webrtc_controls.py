@@ -52,7 +52,14 @@ class CerealDataChannelSender:
     self.max_observed_buffered_amount = 0
 
   def buffered_amount(self) -> int:
+    buffered_amount = getattr(self.channel, "buffered_amount", None)
+    if callable(buffered_amount):
+      return int(buffered_amount())
     return int(getattr(self.channel, "bufferedAmount", 0))
+
+  def channel_open(self) -> bool:
+    is_open = getattr(self.channel, "is_open", None)
+    return bool(is_open()) if callable(is_open) else True
 
   async def run(self) -> None:
     last_log = time.monotonic()
@@ -60,6 +67,9 @@ class CerealDataChannelSender:
       self.sm.update(0)
       for service, updated in self.sm.updated.items():
         if not updated:
+          continue
+        if not self.channel_open():
+          self.skipped[service] += 1
           continue
         buffered_amount = self.buffered_amount()
         self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)

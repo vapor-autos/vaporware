@@ -2,11 +2,11 @@ import asyncio
 from dataclasses import asdict
 import json
 
-import aiortc
 import requests
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from teleoprtc import WebRTCOfferBuilder, StreamingOffer
+from teleoprtc.stream import RTCSessionDescription
 
 
 CAMERA_TYPES = ("road", "driver", "wideRoad")
@@ -18,7 +18,7 @@ class WebrtcdConnectionProvider:
     self.cameras = cameras
     self.enabled = enabled
 
-  async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
+  async def __call__(self, offer: StreamingOffer) -> RTCSessionDescription:
     body = StreamRequestBody(
       sdp=offer.sdp,
       init_camera=self.cameras[0],
@@ -32,7 +32,7 @@ class WebrtcdConnectionProvider:
       return resp.json()
 
     payload = await asyncio.to_thread(post_offer)
-    return aiortc.RTCSessionDescription(sdp=payload["sdp"], type=payload["type"])
+    return RTCSessionDescription(sdp=payload["sdp"], type=payload["type"])
 
 
 def parse_cameras(cameras_arg: str) -> list[str]:
@@ -55,4 +55,8 @@ def build_offer(host: str, port: int, cameras: list[str]) -> WebRTCOfferBuilder:
 
 def send_livestream_quality(stream, quality: str | None) -> None:
   if quality:
-    stream.get_messaging_channel().send(json.dumps({"type": "livestreamSettings", "data": {"quality": quality}}))
+    channel = stream.get_messaging_channel()
+    is_open = getattr(channel, "is_open", None)
+    if callable(is_open) and not is_open():
+      return
+    channel.send(json.dumps({"type": "livestreamSettings", "data": {"quality": quality}}))
