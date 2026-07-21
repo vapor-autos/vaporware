@@ -1,7 +1,8 @@
 import asyncio
 import contextlib
 import dataclasses
-import os
+import multiprocessing as mp
+import queue
 import time
 from typing import Any
 
@@ -118,6 +119,55 @@ def data_channel_summary(channel) -> dict[str, Any]:
   }
 
 
+def vipc_publisher_main(
+  server_name: str,
+  stream_specs: list[tuple[str, int, int, int]],
+  num_buffers: int,
+  frame_queue,
+) -> None:
+  stream_types: dict[str, VisionStreamType] = {}
+  vipc_server = VisionIpcServer(server_name)
+  for camera, stream_type_value, width, height in stream_specs:
+    stream_type = VisionStreamType(stream_type_value)
+    stream_types[camera] = stream_type
+    vipc_server.create_buffers(stream_type, num_buffers, width, height)
+    print(f"vipc {camera} {width}x{height}", flush=True)
+  vipc_server.start_listener()
+
+  while True:
+    item = frame_queue.get()
+    if item is None:
+      return
+    camera, data, frame_id, timestamp = item
+    vipc_server.send(stream_types[camera], data, frame_id, timestamp, timestamp)
+
+
+def put_latest_frame(frame_queue, item) -> None:
+  while True:
+    try:
+      frame_queue.put_nowait(item)
+      return
+    except queue.Full:
+      with contextlib.suppress(queue.Empty):
+        frame_queue.get_nowait()
+
+
+def stop_vipc_publisher(process: mp.Process | None, frame_queue) -> None:
+  if frame_queue is not None:
+    with contextlib.suppress(Exception):
+      frame_queue.put_nowait(None)
+  if process is None:
+    return
+
+  process.join(timeout=1.0)
+  if process.is_alive():
+    process.terminate()
+    process.join(timeout=2.0)
+  if process.is_alive():
+    process.kill()
+    process.join(timeout=2.0)
+
+
 async def print_stats(stream, interval: float, stats_file: str | None = None, latest_file: str | None = None) -> None:
   while stream.is_started:
     await asyncio.sleep(interval)
@@ -140,15 +190,12 @@ async def print_stats(stream, interval: float, stats_file: str | None = None, la
 async def pump_camera(
   camera: str,
   receiver: H264FrameReceiver,
-  vipc_server: VisionIpcServer,
+  frame_queue,
   first_frame: DecodedVideoFrame,
-  send_lock: asyncio.Lock,
   frame_counts: dict[str, int],
   perf_stats: dict[str, dict[str, int]],
   end_time: float | None,
-  send_timeout: float,
 ) -> None:
-  stream_type = CAMERA_STREAMS[camera]
   frame: DecodedVideoFrame | None = first_frame
 
   while end_time is None or time.monotonic() < end_time:
@@ -162,10 +209,9 @@ async def pump_camera(
     timestamp = time.monotonic_ns()
 
     send_wait_start = time.monotonic_ns()
-    async with send_lock:
-      send_start = time.monotonic_ns()
-      await send_vipc_frame(vipc_server, stream_type, frame, frame_id, timestamp, camera, send_timeout)
-      send_ns = time.monotonic_ns() - send_start
+    send_start = time.monotonic_ns()
+    put_latest_frame(frame_queue, (camera, frame.data.tobytes(), frame_id, timestamp))
+    send_ns = time.monotonic_ns() - send_start
 
     stats = perf_stats[camera]
     stats["decode_ns"] += decode_ns
@@ -176,27 +222,6 @@ async def pump_camera(
 
     frame_counts[camera] = frame_id + 1
     frame = None
-
-
-async def send_vipc_frame(
-  vipc_server: VisionIpcServer,
-  stream_type: VisionStreamType,
-  frame: DecodedVideoFrame,
-  frame_id: int,
-  timestamp: int,
-  camera: str,
-  send_timeout: float,
-) -> None:
-  send = asyncio.to_thread(vipc_server.send, stream_type, frame.data.data, frame_id, timestamp, timestamp)
-  if send_timeout <= 0:
-    await send
-    return
-
-  try:
-    await asyncio.wait_for(send, timeout=send_timeout)
-  except TimeoutError:
-    print(f"fatal: vipc send blocked camera={camera} timeout={send_timeout:g}s; restarting turbo_webrtc_signald", flush=True)
-    os._exit(1)
 
 
 async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, dict[str, int]], interval: float) -> None:
@@ -243,7 +268,6 @@ async def publish_stream_to_vipc(
   num_buffers: int,
   duration: float,
   log_interval: float,
-  send_timeout: float | None = None,
 ) -> None:
   receivers = {
     camera: H264FrameReceiver(stream.get_incoming_video_track(camera))
@@ -251,6 +275,8 @@ async def publish_stream_to_vipc(
   }
   log_task = None
   camera_tasks = []
+  vipc_process: mp.Process | None = None
+  frame_queue = None
 
   try:
     first_frames = dict(zip(
@@ -259,18 +285,18 @@ async def publish_stream_to_vipc(
       strict=True,
     ))
 
-    vipc_server = VisionIpcServer(server_name)
-    for camera, frame in first_frames.items():
-      vipc_server.create_buffers(CAMERA_STREAMS[camera], num_buffers, frame.width, frame.height)
-      print(f"vipc {camera} {frame.width}x{frame.height}", flush=True)
-    vipc_server.start_listener()
+    stream_specs = [
+      (camera, int(CAMERA_STREAMS[camera]), frame.width, frame.height)
+      for camera, frame in first_frames.items()
+    ]
+    ctx = mp.get_context("spawn")
+    frame_queue = ctx.Queue(maxsize=max(2, len(cameras) * 2))
+    vipc_process = ctx.Process(target=vipc_publisher_main, args=(server_name, stream_specs, num_buffers, frame_queue))
+    vipc_process.start()
 
     end_time = None if duration <= 0 else time.monotonic() + duration
     frame_counts = dict.fromkeys(cameras, 0)
     perf_stats = {camera: new_perf_stats() for camera in cameras}
-    send_lock = asyncio.Lock()
-    if send_timeout is None:
-      send_timeout = float(os.getenv("TURBO_GCS_VIPC_SEND_TIMEOUT", "0.5"))
 
     if log_interval > 0:
       log_task = asyncio.create_task(log_frame_counts(frame_counts, perf_stats, log_interval))
@@ -279,13 +305,11 @@ async def publish_stream_to_vipc(
       asyncio.create_task(pump_camera(
         camera,
         receivers[camera],
-        vipc_server,
+        frame_queue,
         first_frames[camera],
-        send_lock,
         frame_counts,
         perf_stats,
         end_time,
-        send_timeout,
       ))
       for camera in cameras
     ]
@@ -301,3 +325,4 @@ async def publish_stream_to_vipc(
       await asyncio.gather(*pending, return_exceptions=True)
     for receiver in receivers.values():
       receiver.close()
+    stop_vipc_publisher(vipc_process, frame_queue)
