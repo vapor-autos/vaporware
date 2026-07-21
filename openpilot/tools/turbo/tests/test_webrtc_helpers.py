@@ -1,12 +1,15 @@
 import asyncio
 import importlib
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 
 from openpilot.tools.turbo.webrtc_client import WebrtcdConnectionProvider
 from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender
+from openpilot.tools.turbo import webrtc_signald
 from openpilot.tools.turbo.webrtc_signald import GcsAnswerProvider
+from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo import webrtc_vipc_publisher
 from teleoprtc import StreamingOffer
 from teleoprtc.stream import RTCSessionDescription
@@ -64,18 +67,84 @@ def test_gcs_answer_provider_returns_teleoprtc_description():
   asyncio.run(run_test())
 
 
-def test_data_channel_sender_avoids_libdatachannel_buffered_amount():
+def test_gcs_answer_provider_supports_data_only_offer():
+  async def run_test():
+    provider = GcsAnswerProvider("session", [], ["g29"])
+    task = asyncio.create_task(provider(StreamingOffer(sdp="offer-sdp", video=[])))
+
+    await asyncio.wait_for(provider.offer_ready.wait(), timeout=1)
+    assert provider.offer_body is not None
+    assert provider.offer_body.init_camera == ""
+    assert provider.offer_body.cameras == []
+    assert provider.offer_body.bridge_services_in == ["g29"]
+
+    provider.set_answer({"sdp": "answer-sdp", "type": "answer"})
+    assert await task == RTCSessionDescription(sdp="answer-sdp", type="answer")
+
+  asyncio.run(run_test())
+
+
+def test_signaling_state_serves_video_then_controls_offer(monkeypatch):
+  async def run_test():
+    class FakeProvider:
+      def __init__(self, kind):
+        self.offer_ready = asyncio.Event()
+        self.offer_ready.set()
+        self.answer_future = asyncio.get_running_loop().create_future()
+        self.offer_body = StreamRequestBody(
+          sdp=f"{kind}-offer",
+          init_camera="wideRoad" if kind == "video" else "",
+          enabled=True,
+          bridge_services_in=[] if kind == "video" else ["g29"],
+          cameras=["wideRoad"] if kind == "video" else [],
+        )
+
+      def set_answer(self, answer):
+        self.answer_future.set_result(answer)
+
+    class FakeSession:
+      def __init__(self, _args, _cameras, kind):
+        self.kind = kind
+        self.session_id = kind
+        self.provider = FakeProvider(kind)
+        self.task = asyncio.get_running_loop().create_future()
+
+      async def stop(self):
+        self.task.cancel()
+
+    args = SimpleNamespace(
+      cameras="wideRoad",
+      control_services="g29",
+      synthetic_data_rate=0,
+    )
+    monkeypatch.setattr(webrtc_signald, "SignalingSession", FakeSession)
+
+    state = webrtc_signald.SignalingState(args)
+    video = await state.get_offer_session(offer_timeout=1)
+    assert video.kind == "video"
+    await state.set_answer("video", {"sdp": "video-answer", "type": "answer"})
+
+    controls = await state.get_offer_session(offer_timeout=1)
+    assert controls.kind == "controls"
+    assert controls.provider.offer_body.bridge_services_in == ["g29"]
+
+    await state.stop()
+
+  asyncio.run(run_test())
+
+
+def test_data_channel_sender_avoids_libdatachannel_state_queries():
   class Channel:
     def buffered_amount(self):
       raise AssertionError("libdatachannel buffered_amount should not be queried")
 
     def is_open(self):
-      return False
+      raise AssertionError("libdatachannel is_open should not be queried")
 
   sender = CerealDataChannelSender(["customReservedRawData0"], Channel())
 
   assert sender.buffered_amount() == 0
-  assert not sender.channel_open()
+  assert sender.channel_open()
 
 
 def test_h264_frame_receiver_decodes_queued_frames(monkeypatch):

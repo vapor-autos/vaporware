@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import multiprocessing as mp
 import queue
+import threading
 import time
 from typing import Any
 
@@ -28,12 +29,11 @@ class DecodedVideoFrame:
   height: int
 
 
-class H264FrameReceiver:
+class H264SampleReceiver:
   def __init__(self, track: Track, max_pending_frames: int = 2, keyframe_retry_interval: float = 0.5):
     self._loop = asyncio.get_running_loop()
     self._track = track
     self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=max_pending_frames)
-    self._decoder = Decoder("h264")
     self._keyframe_retry_interval = keyframe_retry_interval
     self._closed = False
 
@@ -47,7 +47,6 @@ class H264FrameReceiver:
 
   def close(self) -> None:
     self._closed = True
-    self._decoder.close()
 
   def request_keyframe(self) -> None:
     if self._track.is_open():
@@ -65,15 +64,31 @@ class H264FrameReceiver:
         self._queue.get_nowait()
     self._queue.put_nowait(data)
 
-  async def recv(self) -> DecodedVideoFrame:
+  async def recv(self) -> bytes:
     while True:
       try:
-        data = await asyncio.wait_for(self._queue.get(), timeout=self._keyframe_retry_interval)
+        return await asyncio.wait_for(self._queue.get(), timeout=self._keyframe_retry_interval)
       except TimeoutError:
         if not self._track.is_open():
           raise ConnectionError("video track closed before decoded frame was available") from None
         self.request_keyframe()
-        continue
+
+
+class H264FrameReceiver:
+  def __init__(self, track: Track, max_pending_frames: int = 2, keyframe_retry_interval: float = 0.5):
+    self._receiver = H264SampleReceiver(track, max_pending_frames, keyframe_retry_interval)
+    self._decoder = Decoder("h264")
+
+  def close(self) -> None:
+    self._receiver.close()
+    self._decoder.close()
+
+  def request_keyframe(self) -> None:
+    self._receiver.request_keyframe()
+
+  async def recv(self) -> DecodedVideoFrame:
+    while True:
+      data = await self._receiver.recv()
       try:
         decoded = self._decoder.decode(data)
       except FFmpegError:
@@ -100,62 +115,87 @@ def stat_dict(stat) -> dict:
   return dict(getattr(stat, "__dict__", {}))
 
 
-def describe_state(value) -> str | None:
-  if value is None:
-    return None
-  return getattr(value, "name", None) or str(value)
-
-
-def call_optional(obj, name: str):
-  method = getattr(obj, name, None)
-  return method() if callable(method) else None
-
-
-def data_channel_summary(channel) -> dict[str, Any]:
-  # Avoid DataChannel.buffered_amount(); libdatachannel-py 2026.1.0.dev2 can
-  # segfault when it is queried from the Python stats loop.
-  return {
-    "open": call_optional(channel, "is_open"),
-  }
-
-
 def vipc_publisher_main(
   server_name: str,
-  stream_specs: list[tuple[str, int, int, int]],
+  stream_specs: list[tuple[str, int]],
   num_buffers: int,
   frame_queue,
 ) -> None:
-  stream_types: dict[str, VisionStreamType] = {}
+  stream_types = {camera: VisionStreamType(stream_type_value) for camera, stream_type_value in stream_specs}
+  decoders = {camera: Decoder("h264") for camera, _ in stream_specs}
   vipc_server = VisionIpcServer(server_name)
-  for camera, stream_type_value, width, height in stream_specs:
-    stream_type = VisionStreamType(stream_type_value)
-    stream_types[camera] = stream_type
-    vipc_server.create_buffers(stream_type, num_buffers, width, height)
-    print(f"vipc {camera} {width}x{height}", flush=True)
-  vipc_server.start_listener()
+  pending_first_frames: dict[str, tuple[np.ndarray, int, int, int, int]] = {}
+  listener_started = False
 
   while True:
     item = frame_queue.get()
     if item is None:
       return
-    camera, data, frame_id, timestamp = item
-    vipc_server.send(stream_types[camera], data, frame_id, timestamp, timestamp)
-
-
-def put_latest_frame(frame_queue, item) -> None:
-  while True:
+    camera, h264_data, frame_id, timestamp = item
+    decoder = decoders[camera]
     try:
-      frame_queue.put_nowait(item)
+      decoded = decoder.decode(h264_data)
+    except FFmpegError:
+      decoder.reset()
+      continue
+    if decoded is None:
+      continue
+
+    if not listener_started:
+      pending_first_frames[camera] = (decoded, decoder.width, decoder.height, frame_id, timestamp)
+      if len(pending_first_frames) != len(stream_specs):
+        continue
+
+      for first_camera, (_, width, height, _, _) in pending_first_frames.items():
+        vipc_server.create_buffers(stream_types[first_camera], num_buffers, width, height)
+        print(f"vipc {first_camera} {width}x{height}", flush=True)
+      vipc_server.start_listener()
+      listener_started = True
+
+      for first_camera, (first_data, _, _, first_frame_id, first_timestamp) in pending_first_frames.items():
+        vipc_server.send(stream_types[first_camera], first_data.data, first_frame_id, first_timestamp, first_timestamp)
+      pending_first_frames.clear()
+      continue
+
+    vipc_server.send(stream_types[camera], decoded.data, frame_id, timestamp, timestamp)
+
+
+class FrameQueueBridge:
+  def __init__(self, mp_frame_queue, max_pending_frames: int):
+    self._mp_frame_queue = mp_frame_queue
+    self._local_queue: queue.Queue = queue.Queue(maxsize=max_pending_frames)
+    self._thread = threading.Thread(target=self._forward, daemon=True)
+    self._thread.start()
+
+  def put_latest(self, item) -> None:
+    try:
+      self._local_queue.put_nowait(item)
       return
     except queue.Full:
       with contextlib.suppress(queue.Empty):
-        frame_queue.get_nowait()
+        self._local_queue.get_nowait()
+    with contextlib.suppress(queue.Full):
+      self._local_queue.put_nowait(item)
+
+  def close(self) -> None:
+    with contextlib.suppress(queue.Full):
+      self._local_queue.put_nowait(None)
+    self._thread.join(timeout=1.0)
+
+  def _forward(self) -> None:
+    while True:
+      item = self._local_queue.get()
+      self._mp_frame_queue.put(item)
+      if item is None:
+        return
 
 
-def stop_vipc_publisher(process: mp.Process | None, frame_queue) -> None:
-  if frame_queue is not None:
+def stop_vipc_publisher(process: mp.Process | None, frame_bridge: FrameQueueBridge | None, mp_frame_queue) -> None:
+  if frame_bridge is not None:
+    frame_bridge.close()
+  if mp_frame_queue is not None:
     with contextlib.suppress(Exception):
-      frame_queue.put_nowait(None)
+      mp_frame_queue.put_nowait(None)
   if process is None:
     return
 
@@ -169,12 +209,11 @@ def stop_vipc_publisher(process: mp.Process | None, frame_queue) -> None:
 
 
 async def print_stats(stream, interval: float, stats_file: str | None = None, latest_file: str | None = None) -> None:
-  while stream.is_started:
+  while True:
     await asyncio.sleep(interval)
     summary: dict[str, Any] = {
       "connection": {
-        "state": describe_state(call_optional(stream.peer_connection, "state")),
-        "gathering_state": describe_state(call_optional(stream.peer_connection, "gathering_state")),
+        "started": True,
       },
       "receiver_reports": {
         camera: stat_dict(report)
@@ -183,34 +222,29 @@ async def print_stats(stream, interval: float, stats_file: str | None = None, la
     }
 
     if stream.messaging_channel is not None:
-      summary["data_channel"] = data_channel_summary(stream.messaging_channel)
+      summary["data_channel"] = {"present": True}
     write_metrics_payload({"stats": summary}, stats_file, latest_file)
 
 
 async def pump_camera(
   camera: str,
-  receiver: H264FrameReceiver,
-  frame_queue,
-  first_frame: DecodedVideoFrame,
+  receiver: H264SampleReceiver,
+  frame_bridge: FrameQueueBridge,
   frame_counts: dict[str, int],
   perf_stats: dict[str, dict[str, int]],
   end_time: float | None,
 ) -> None:
-  frame: DecodedVideoFrame | None = first_frame
-
   while end_time is None or time.monotonic() < end_time:
-    decode_ns = 0
-    if frame is None:
-      decode_start = time.monotonic_ns()
-      frame = await receiver.recv()
-      decode_ns = time.monotonic_ns() - decode_start
+    decode_start = time.monotonic_ns()
+    h264_data = await receiver.recv()
+    decode_ns = time.monotonic_ns() - decode_start
 
     frame_id = frame_counts[camera]
     timestamp = time.monotonic_ns()
 
     send_wait_start = time.monotonic_ns()
     send_start = time.monotonic_ns()
-    put_latest_frame(frame_queue, (camera, frame.data.tobytes(), frame_id, timestamp))
+    frame_bridge.put_latest((camera, h264_data, frame_id, timestamp))
     send_ns = time.monotonic_ns() - send_start
 
     stats = perf_stats[camera]
@@ -221,7 +255,6 @@ async def pump_camera(
     stats["send_max_ns"] = max(stats["send_max_ns"], send_ns)
 
     frame_counts[camera] = frame_id + 1
-    frame = None
 
 
 async def log_frame_counts(frame_counts: dict[str, int], perf_stats: dict[str, dict[str, int]], interval: float) -> None:
@@ -270,28 +303,24 @@ async def publish_stream_to_vipc(
   log_interval: float,
 ) -> None:
   receivers = {
-    camera: H264FrameReceiver(stream.get_incoming_video_track(camera))
+    camera: H264SampleReceiver(stream.get_incoming_video_track(camera))
     for camera in cameras
   }
   log_task = None
   camera_tasks = []
   vipc_process: mp.Process | None = None
-  frame_queue = None
+  mp_frame_queue = None
+  frame_bridge: FrameQueueBridge | None = None
 
   try:
-    first_frames = dict(zip(
-      cameras,
-      await asyncio.gather(*(receivers[camera].recv() for camera in cameras)),
-      strict=True,
-    ))
-
     stream_specs = [
-      (camera, int(CAMERA_STREAMS[camera]), frame.width, frame.height)
-      for camera, frame in first_frames.items()
+      (camera, int(CAMERA_STREAMS[camera]))
+      for camera in cameras
     ]
     ctx = mp.get_context("spawn")
-    frame_queue = ctx.Queue(maxsize=max(2, len(cameras) * 2))
-    vipc_process = ctx.Process(target=vipc_publisher_main, args=(server_name, stream_specs, num_buffers, frame_queue))
+    mp_frame_queue = ctx.Queue(maxsize=max(4, len(cameras) * 4))
+    frame_bridge = FrameQueueBridge(mp_frame_queue, max_pending_frames=max(4, len(cameras) * 4))
+    vipc_process = ctx.Process(target=vipc_publisher_main, args=(server_name, stream_specs, num_buffers, mp_frame_queue))
     vipc_process.start()
 
     end_time = None if duration <= 0 else time.monotonic() + duration
@@ -305,8 +334,7 @@ async def publish_stream_to_vipc(
       asyncio.create_task(pump_camera(
         camera,
         receivers[camera],
-        frame_queue,
-        first_frames[camera],
+        frame_bridge,
         frame_counts,
         perf_stats,
         end_time,
@@ -325,4 +353,4 @@ async def publish_stream_to_vipc(
       await asyncio.gather(*pending, return_exceptions=True)
     for receiver in receivers.values():
       receiver.close()
-    stop_vipc_publisher(vipc_process, frame_queue)
+    stop_vipc_publisher(vipc_process, frame_bridge, mp_frame_queue)

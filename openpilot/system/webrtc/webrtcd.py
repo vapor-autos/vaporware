@@ -12,6 +12,7 @@ import contextlib
 import json
 import uuid
 import logging
+import queue
 import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,10 +118,40 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
 
 
 class CerealIncomingMessageProxy:
-  def __init__(self, pm: messaging.PubMaster):
+  def __init__(self, pm: messaging.PubMaster, max_pending: int = 64):
     self.pm = pm
+    self.logger = logging.getLogger("webrtcd")
+    self.queue: queue.Queue[bytes | str | None] = queue.Queue(maxsize=max_pending)
+    self.thread = threading.Thread(target=self._run, daemon=True)
+    self.thread.start()
 
-  def send(self, message: bytes):
+  def close(self):
+    with contextlib.suppress(queue.Empty):
+      self.queue.get_nowait()
+    with contextlib.suppress(queue.Full):
+      self.queue.put_nowait(None)
+    self.thread.join(timeout=1.0)
+
+  def send(self, message: bytes | str):
+    try:
+      self.queue.put_nowait(message)
+    except queue.Full:
+      with contextlib.suppress(queue.Empty):
+        self.queue.get_nowait()
+      with contextlib.suppress(queue.Full):
+        self.queue.put_nowait(message)
+
+  def _run(self):
+    while True:
+      message = self.queue.get()
+      if message is None:
+        return
+      try:
+        self._send_now(message)
+      except Exception:
+        self.logger.exception("Cereal incoming proxy failure")
+
+  def _send_now(self, message: bytes | str):
     msg_json = json.loads(message)
     msg_type, msg_data = msg_json["type"], msg_json["data"]
     size = None
@@ -270,8 +301,10 @@ class StreamSession:
     builder = WebRTCAnswerBuilder(body.sdp, bind_address=_default_route_ip())
 
     self.enabled = body.enabled
-    cameras = body.cameras if body.cameras else [body.init_camera]
-    assert body.init_camera in cameras, "init_camera must be included in cameras"
+    cameras = body.cameras if body.cameras else ([body.init_camera] if body.init_camera else [])
+    if body.init_camera:
+      assert body.init_camera in cameras, "init_camera must be included in cameras"
+    self.has_video = len(cameras) > 0
     # aiortc polls each track from the event loop; this does not create one Python thread per camera.
     # Keep the encoded sockets conflated for teleop video: bounded backpressure here would preserve
     # stale frames and grow latency when the network or GCS decoder falls behind.
@@ -281,7 +314,7 @@ class StreamSession:
     }
     for camera, track in self.video_tracks.items():
       builder.add_video_stream(camera, track)
-    self.video_track = self.video_tracks[body.init_camera]
+    self.video_track = self.video_tracks.get(body.init_camera)
     self.stream = builder.stream()
 
     self.incoming_bridge: CerealIncomingMessageProxy | None = None
@@ -293,8 +326,9 @@ class StreamSession:
       self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
     if len(body.bridge_services_out) > 0:
       self.outgoing_bridge = CerealOutgoingMessageProxy(body.bridge_services_out, self.enabled)
-    self.bitrate_controller = LivestreamBitrateController(self.stream.get_receiver_report_stats, self.params, self.enabled)
-    if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
+    if self.has_video:
+      self.bitrate_controller = LivestreamBitrateController(self.stream.get_receiver_report_stats, self.params, self.enabled)
+    if self.has_video and os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
       self.stats_logger = WebRTCStatsLogger(
         self.stream.get_receiver_report_stats,
         float(os.getenv("WEBRTCD_STATS_INTERVAL", "2.0")),
@@ -332,7 +366,7 @@ class StreamSession:
 
         match msg_type:
           case "livestreamCameraSwitch":
-            if hasattr(self.video_track, "switch_camera"):
+            if self.video_track is not None and hasattr(self.video_track, "switch_camera"):
               self.video_track.switch_camera(payload["data"]["camera"])
           case "livestreamSettings":
             if self.bitrate_controller is not None:
@@ -368,12 +402,13 @@ class StreamSession:
 
   async def run(self):
     try:
-      self.params.put("LivestreamRequestKeyframe", True)
+      if self.has_video:
+        self.params.put("LivestreamRequestKeyframe", True)
       await asyncio.wait_for(self.stream.wait_for_connection(), timeout=15)
       if self.stream.has_messaging_channel():
-        self.stream.set_message_handler(self.message_handler)
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
+        self.stream.set_message_handler(self.message_handler)
         if self.outgoing_bridge is not None:
           channel = self.stream.get_messaging_channel()
           self.outgoing_bridge.add_channel(channel)
@@ -396,13 +431,16 @@ class StreamSession:
       if self._cleanup_done:
         return
       self._cleanup_done = True
-      self.params.put("LivestreamRequestKeyframe", False)
+      if self.has_video:
+        self.params.put("LivestreamRequestKeyframe", False)
       if self.stats_logger is not None:
         await self.stats_logger.stop()
       if self.bitrate_controller is not None:
         await self.bitrate_controller.stop()
       if self.outgoing_bridge is not None:
         await self.outgoing_bridge.stop()
+      if self.incoming_bridge is not None:
+        self.incoming_bridge.close()
       for track in self.video_tracks.values():
         track.stop()
       self.video_tracks = {}
@@ -441,14 +479,17 @@ def _text_response(text: str, status: int = 200) -> tuple[int, bytes, str]:
 async def handle_get_stream(state: ServerState, raw_body: bytes) -> tuple[int, bytes, str]:
   stream_dict, debug_mode = state.streams, state.debug
   body = StreamRequestBody(**json.loads(raw_body))
+  body_has_video = bool(body.cameras or body.init_camera)
 
   async with state.stream_lock:
     # don't remove existing connection on prewarm request
-    enabled = any(s.run_task and not s.run_task.done() and s.enabled for s in stream_dict.values())
-    if enabled and not body.enabled:
+    enabled = any(s.run_task and not s.run_task.done() and s.enabled and s.has_video for s in stream_dict.values())
+    if body_has_video and enabled and not body.enabled:
       return _json_response({"error": "busy", "message": "someone else is connected."})
 
     for sid, s in list(stream_dict.items()):
+      if s.has_video != body_has_video:
+        continue
       if s.run_task and not s.run_task.done():
         try:
           ch = s.stream.get_messaging_channel()

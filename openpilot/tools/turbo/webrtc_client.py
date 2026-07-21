@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import asdict
 import json
+import threading
 
 import requests
 
@@ -56,7 +57,12 @@ def build_offer(host: str, port: int, cameras: list[str]) -> WebRTCOfferBuilder:
 def send_livestream_quality(stream, quality: str | None) -> None:
   if quality:
     channel = stream.get_messaging_channel()
-    is_open = getattr(channel, "is_open", None)
-    if callable(is_open) and not is_open():
-      return
-    channel.send(json.dumps({"type": "livestreamSettings", "data": {"quality": quality}}))
+    payload = json.dumps({"type": "livestreamSettings", "data": {"quality": quality}})
+
+    def send() -> None:
+      try:
+        channel.send(payload)
+      except Exception:
+        return
+
+    threading.Thread(target=send, daemon=True).start()
