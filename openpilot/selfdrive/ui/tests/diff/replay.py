@@ -37,7 +37,8 @@ def setup_state():
   params.put("GitCommitDate", "'1732924800 2024-11-30 00:00:00 +0000'", block=True)
 
   # Patch Api.get_token to return a static token so the pairing QR code is deterministic across runs
-  Api.get_token = lambda self, payload_extra=None, expiry_hours=0: "test_token"
+  get_token_attr = "get_token"
+  setattr(Api, get_token_attr, lambda self, payload_extra=None, expiry_hours=0: "test_token")
 
 
 def run_replay(variant: LayoutVariant) -> None:

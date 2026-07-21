@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+import contextlib
 import os
 import time
+import uuid
 
 import requests
 
@@ -27,10 +29,10 @@ def join_url(base_url: str, path: str) -> str:
   return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
-async def fetch_offer(base_url: str, timeout: float) -> Offer:
+async def fetch_offer(base_url: str, request_timeout: float) -> Offer:
   def get_offer() -> dict:
-    resp = requests.get(join_url(base_url, "/offer"), timeout=timeout)
-    if resp.status_code == 409:
+    resp = requests.get(join_url(base_url, "/offer"), timeout=request_timeout)
+    if resp.status_code in (409, 503):
       raise OfferUnavailable(resp.text)
     resp.raise_for_status()
     return resp.json()
@@ -40,12 +42,12 @@ async def fetch_offer(base_url: str, timeout: float) -> Offer:
   return Offer(StreamRequestBody(**payload), session_id)
 
 
-async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, answer_type: str, timeout: float) -> None:
+async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, answer_type: str, request_timeout: float) -> None:
   def send_answer() -> None:
     payload = {"sdp": answer_sdp, "type": answer_type}
     if session_id is not None:
       payload["session_id"] = session_id
-    resp = requests.post(join_url(base_url, "/answer"), json=payload, timeout=timeout)
+    resp = requests.post(join_url(base_url, "/answer"), json=payload, timeout=request_timeout)
     if resp.status_code == 409:
       raise AnswerRejected(resp.text)
     resp.raise_for_status()
@@ -53,10 +55,10 @@ async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, an
   await asyncio.to_thread(send_answer)
 
 
-async def run_once(args: argparse.Namespace) -> None:
-  offer = await fetch_offer(args.signaling_url, args.http_timeout)
+async def start_session(args: argparse.Namespace, offer: Offer) -> asyncio.Task:
   body = offer.body
-  print(f"received offer session={offer.session_id or 'unknown'} cameras={','.join(body.cameras or [body.init_camera])}", flush=True)
+  cameras = ",".join(body.cameras or ([body.init_camera] if body.init_camera else [])) or "none"
+  print(f"received offer session={offer.session_id or 'unknown'} cameras={cameras}", flush=True)
 
   session = StreamSession(body)
   try:
@@ -65,24 +67,61 @@ async def run_once(args: argparse.Namespace) -> None:
     print(f"posted answer session={offer.session_id or 'unknown'}", flush=True)
     session.start()
     assert session.run_task is not None
-    await session.run_task
-  finally:
+  except Exception:
     await session.stop()
+    raise
+
+  async def wait_for_session() -> None:
+    try:
+      assert session.run_task is not None
+      await session.run_task
+    finally:
+      await session.stop()
+
+  return asyncio.create_task(wait_for_session())
+
+
+async def run_once(args: argparse.Namespace) -> None:
+  offer = await fetch_offer(args.signaling_url, args.http_timeout)
+  task = await start_session(args, offer)
+  try:
+    await task
+  finally:
+    if not task.done():
+      task.cancel()
+      await asyncio.gather(task, return_exceptions=True)
 
 
 async def run(args: argparse.Namespace) -> None:
-  while True:
-    start = time.monotonic()
-    try:
-      await run_once(args)
-    except asyncio.CancelledError:
-      raise
-    except Exception as e:
-      print(f"uplink session failed: {type(e).__name__}: {e}", flush=True)
+  active_sessions: dict[str, asyncio.Task] = {}
+  try:
+    while True:
+      start = time.monotonic()
+      for session_id, task in list(active_sessions.items()):
+        if task.done():
+          active_sessions.pop(session_id, None)
+          with contextlib.suppress(Exception):
+            task.result()
 
-    elapsed = time.monotonic() - start
-    sleep_s = args.retry_delay if elapsed >= args.retry_delay else args.retry_delay - elapsed
-    await asyncio.sleep(sleep_s)
+      try:
+        offer = await fetch_offer(args.signaling_url, args.http_timeout)
+        session_id = offer.session_id or uuid.uuid4().hex
+        if session_id not in active_sessions:
+          active_sessions[session_id] = await start_session(args, offer)
+      except OfferUnavailable:
+        pass
+      except asyncio.CancelledError:
+        raise
+      except Exception as e:
+        print(f"uplink session failed: {type(e).__name__}: {e}", flush=True)
+
+      elapsed = time.monotonic() - start
+      sleep_s = args.retry_delay if elapsed >= args.retry_delay else args.retry_delay - elapsed
+      await asyncio.sleep(sleep_s)
+  finally:
+    for task in active_sessions.values():
+      task.cancel()
+    await asyncio.gather(*active_sessions.values(), return_exceptions=True)
 
 
 def main() -> None:

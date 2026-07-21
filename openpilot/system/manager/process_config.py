@@ -10,6 +10,7 @@ WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_SIGNALING_PORT = os.getenv("GCS_SIGNALING_PORT")
 GCS_SIGNALING_URL = os.getenv("GCS_SIGNALING_URL")
+TURBO_GCS_DEBUG_UI = os.getenv("TURBO_GCS_DEBUG_UI") is not None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return ((started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")) or livestream(started, params, CP)
@@ -138,7 +139,7 @@ procs = [
   PythonProcess("turbo_webrtc_signald", "openpilot.tools.turbo.webrtc_signald",
                 gcs, enabled=PC and GCS_SIGNALING_PORT is not None, restart_if_crash=True),
   PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
-  PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
+  PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC and TURBO_GCS_DEBUG_UI, restart_if_crash=True),
 
   # turbo ugv procs
   PythonProcess("turbo_webrtc_uplink", "openpilot.tools.turbo.webrtc_uplink",
