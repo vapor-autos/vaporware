@@ -1,15 +1,10 @@
 import json
 
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, data_channel_buffered_amount
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver
 
 
 class AiortcChannel:
   bufferedAmount = 123
-
-
-class LibdatachannelChannel:
-  def buffered_amount(self):
-    return 456
 
 
 class FakePubMaster:
@@ -20,12 +15,12 @@ class FakePubMaster:
     self.sent.append((service, msg))
 
 
-def test_data_channel_buffered_amount_accepts_aiortc_property():
-  assert data_channel_buffered_amount(AiortcChannel()) == 123
+def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
+  from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender
 
+  sender = CerealDataChannelSender(["g29"], AiortcChannel())
 
-def test_data_channel_buffered_amount_accepts_libdatachannel_method():
-  assert data_channel_buffered_amount(LibdatachannelChannel()) == 456
+  assert sender.buffered_amount() == 123
 
 
 def test_cereal_data_channel_receiver_publishes_allowlisted_car_state():

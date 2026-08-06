@@ -32,13 +32,6 @@ def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   return json.dumps(msg).encode()
 
 
-def data_channel_buffered_amount(channel) -> int:
-  buffered_amount = getattr(channel, "buffered_amount", None)
-  if callable(buffered_amount):
-    return int(buffered_amount())
-  return int(getattr(channel, "bufferedAmount", 0))
-
-
 class CerealDataChannelReceiver:
   def __init__(self, services: list[str], pm: messaging.PubMaster | None = None):
     self.services = list(services)
@@ -95,7 +88,7 @@ class CerealDataChannelSender:
     self.max_observed_buffered_amount = 0
 
   def buffered_amount(self) -> int:
-    return data_channel_buffered_amount(self.channel)
+    return int(getattr(self.channel, "bufferedAmount", 0))
 
   async def run(self) -> None:
     last_log = time.monotonic()
