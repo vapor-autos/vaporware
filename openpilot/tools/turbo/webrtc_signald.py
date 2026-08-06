@@ -10,16 +10,24 @@ import aiortc
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender, parse_control_services
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, CerealDataChannelSender, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
 
 class GcsAnswerProvider:
-  def __init__(self, session_id: str, cameras: list[str], bridge_services_in: list[str], enabled: bool = True):
+  def __init__(
+    self,
+    session_id: str,
+    cameras: list[str],
+    bridge_services_in: list[str],
+    bridge_services_out: list[str],
+    enabled: bool = True,
+  ):
     self.session_id = session_id
     self.cameras = cameras
     self.bridge_services_in = bridge_services_in
+    self.bridge_services_out = bridge_services_out
     self.enabled = enabled
     self.offer_ready = asyncio.Event()
     self.answer_future: asyncio.Future[aiortc.RTCSessionDescription] = asyncio.get_running_loop().create_future()
@@ -32,6 +40,7 @@ class GcsAnswerProvider:
       init_camera=cameras[0],
       enabled=self.enabled,
       bridge_services_in=self.bridge_services_in,
+      bridge_services_out=self.bridge_services_out,
       cameras=cameras,
     )
     self.offer_ready.set()
@@ -48,14 +57,18 @@ class SignalingSession:
     self.args = args
     self.cameras = cameras
     self.control_services = parse_control_services(args.control_services)
+    self.feedback_services = parse_control_services(args.feedback_services)
     self.session_id = uuid.uuid4().hex
-    self.provider = GcsAnswerProvider(self.session_id, cameras, self.control_services)
+    self.provider = GcsAnswerProvider(self.session_id, cameras, self.control_services, self.feedback_services)
     builder = WebRTCOfferBuilder(self.provider)
     for camera in cameras:
       builder.offer_to_receive_video_stream(camera)
-    if args.quality or self.control_services:
+    if args.quality or self.control_services or self.feedback_services:
       builder.add_messaging()
     self.stream = builder.stream()
+    self.feedback_receiver = CerealDataChannelReceiver(self.feedback_services) if self.feedback_services else None
+    if self.feedback_receiver is not None:
+      self.stream.set_message_handler(self.feedback_receiver.receive)
     self.task = asyncio.create_task(self.run())
 
   async def run(self) -> None:
@@ -67,6 +80,8 @@ class SignalingSession:
       if self.args.quality:
         send_livestream_quality(self.stream, self.args.quality)
         print(f"quality={self.args.quality}", flush=True)
+      if self.feedback_services:
+        print(f"feedback={','.join(self.feedback_services)}", flush=True)
 
       stats_task = None
       controls_task = None
@@ -223,6 +238,11 @@ def main() -> None:
     "--control-services",
     default=os.getenv("TURBO_GCS_WEBRTC_CONTROL_SERVICES", ""),
     help="comma-separated local msgq services to send to the UGV over the WebRTC data channel",
+  )
+  parser.add_argument(
+    "--feedback-services",
+    default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_SERVICES", "carState"),
+    help="comma-separated UGV msgq services to receive over the WebRTC data channel and republish locally",
   )
   parser.add_argument(
     "--control-max-buffered-amount",

@@ -13,16 +13,18 @@ CAMERA_TYPES = ("road", "driver", "wideRoad")
 
 
 class WebrtcdConnectionProvider:
-  def __init__(self, host: str, port: int, cameras: list[str], enabled: bool = True):
+  def __init__(self, host: str, port: int, cameras: list[str], enabled: bool = True, feedback_services: list[str] | None = None):
     self.url = f"http://{host}:{port}/stream"
     self.cameras = cameras
     self.enabled = enabled
+    self.feedback_services = [] if feedback_services is None else feedback_services
 
   async def __call__(self, offer: StreamingOffer) -> aiortc.RTCSessionDescription:
     body = StreamRequestBody(
       sdp=offer.sdp,
       init_camera=self.cameras[0],
       enabled=self.enabled,
+      bridge_services_out=self.feedback_services,
       cameras=self.cameras,
     )
 
@@ -46,8 +48,8 @@ def parse_cameras(cameras_arg: str) -> list[str]:
   return cameras
 
 
-def build_offer(host: str, port: int, cameras: list[str]) -> WebRTCOfferBuilder:
-  builder = WebRTCOfferBuilder(WebrtcdConnectionProvider(host, port, cameras))
+def build_offer(host: str, port: int, cameras: list[str], feedback_services: list[str] | None = None) -> WebRTCOfferBuilder:
+  builder = WebRTCOfferBuilder(WebrtcdConnectionProvider(host, port, cameras, feedback_services=feedback_services))
   for camera in cameras:
     builder.offer_to_receive_video_stream(camera)
   return builder

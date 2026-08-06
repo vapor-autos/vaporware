@@ -4,22 +4,29 @@ import os
 
 from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 
 
 async def run(args: argparse.Namespace) -> None:
   cameras = parse_cameras(args.cameras)
-  builder = build_offer(args.host, args.port, cameras)
-  if args.quality:
+  feedback_services = parse_control_services(args.feedback_services)
+  builder = build_offer(args.host, args.port, cameras, feedback_services=feedback_services)
+  if args.quality or feedback_services:
     builder.add_messaging()
 
   stream = builder.stream()
+  feedback_receiver = CerealDataChannelReceiver(feedback_services) if feedback_services else None
+  if feedback_receiver is not None:
+    stream.set_message_handler(feedback_receiver.receive)
   stats_task = None
 
   try:
     await stream.start()
     await stream.wait_for_connection()
     print(f"connected cameras={','.join(cameras)} server={args.server}", flush=True)
+    if feedback_services:
+      print(f"feedback={','.join(feedback_services)}", flush=True)
 
     if args.quality:
       send_livestream_quality(stream, args.quality)
@@ -45,6 +52,11 @@ def main() -> None:
   parser.add_argument("--port", type=int, default=5001, help="UGV/webrtcd HTTP signaling port")
   parser.add_argument("--cameras", default=os.getenv("TURBO_GCS_WEBRTC_CAMS", "wideRoad,driver"), help="comma-separated cameras to request")
   parser.add_argument("--server", default="camerad", help="local VisionIPC server name")
+  parser.add_argument(
+    "--feedback-services",
+    default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_SERVICES", "carState"),
+    help="comma-separated UGV msgq services to receive over the WebRTC data channel and republish locally",
+  )
   parser.add_argument(
     "--quality",
     choices=("low", "med", "high", "auto"),
