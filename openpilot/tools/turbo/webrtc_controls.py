@@ -32,6 +32,49 @@ def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   return json.dumps(msg).encode()
 
 
+def data_channel_buffered_amount(channel) -> int:
+  buffered_amount = getattr(channel, "buffered_amount", None)
+  if callable(buffered_amount):
+    return int(buffered_amount())
+  return int(getattr(channel, "bufferedAmount", 0))
+
+
+class CerealDataChannelReceiver:
+  def __init__(self, services: list[str], pm: messaging.PubMaster | None = None):
+    self.services = list(services)
+    self.service_set = set(services)
+    self.pm = messaging.PubMaster(self.services) if pm is None else pm
+    self.received: dict[str, int] = dict.fromkeys(services, 0)
+    self.ignored = 0
+
+  def receive(self, message: bytes | str) -> bool:
+    payload = json.loads(message)
+    if not isinstance(payload, dict):
+      self.ignored += 1
+      return False
+
+    service = payload.get("type")
+    if service not in self.service_set:
+      self.ignored += 1
+      return False
+
+    msg_data = payload.get("data")
+    size = None
+    if not isinstance(msg_data, dict):
+      size = len(msg_data)
+
+    msg = messaging.new_message(
+      service,
+      size=size,
+      valid=bool(payload.get("valid", False)),
+      logMonoTime=int(payload.get("logMonoTime", time.monotonic() * 1e9)),
+    )
+    setattr(msg, service, msg_data)
+    self.pm.send(service, msg)
+    self.received[service] += 1
+    return True
+
+
 class CerealDataChannelSender:
   def __init__(
     self,
@@ -52,7 +95,7 @@ class CerealDataChannelSender:
     self.max_observed_buffered_amount = 0
 
   def buffered_amount(self) -> int:
-    return int(getattr(self.channel, "bufferedAmount", 0))
+    return data_channel_buffered_amount(self.channel)
 
   async def run(self) -> None:
     last_log = time.monotonic()

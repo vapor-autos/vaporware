@@ -9,6 +9,7 @@ LOG_INTERVAL_FRAMES = 50
 
 TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
+TORQUE_SIM_CARSTATE_STALE_S = 0.25
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -21,6 +22,24 @@ def _accelerator_pedal(accelerator: float) -> float:
 
 def _accelerator_to_simulated_velocity_m_s(accelerator: float, max_velocity_m_s: float) -> float:
   return _accelerator_pedal(accelerator) * max(0.0, max_velocity_m_s)
+
+
+class SpeedSource:
+  def __init__(self, sm: messaging.SubMaster | None = None, stale_timeout_s: float = TORQUE_SIM_CARSTATE_STALE_S):
+    self.sm = messaging.SubMaster(["carState"]) if sm is None else sm
+    self.stale_timeout_s = stale_timeout_s
+    self.last_carstate_age_s: float | None = None
+
+  def update(self, state: dict, now: float | None = None) -> tuple[float, str]:
+    self.sm.update(0)
+    now = time.monotonic() if now is None else now
+    seen = self.sm.seen["carState"]
+    self.last_carstate_age_s = now - self.sm.recv_time["carState"] if seen else None
+
+    if seen and self.sm.valid["carState"] and self.last_carstate_age_s <= self.stale_timeout_s:
+      return abs(float(self.sm["carState"].vEgo)), "carState"
+
+    return _accelerator_to_simulated_velocity_m_s(state["accelerator"], TORQUE_SIM_MAX_VELOCITY_M_S), "pedal"
 
 
 def _dial_delta(events: list[dict]) -> int:
@@ -68,12 +87,15 @@ def _run(sock) -> None:
     g29 = G29()
     g29.set_range(400)
     torque_controller = _make_torque_controller(g29)
+    speed_source = SpeedSource()
     g29.listen()
 
     print(
       " ".join((
         "g29d torque_sim enabled",
-        "pedal_speed=True",
+        "speed_source=carState",
+        "pedal_fallback=True",
+        f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
         f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
         f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
       )),
@@ -86,13 +108,17 @@ def _run(sock) -> None:
       state = g29.get_state()
       events = g29.get_events()
 
-      velocity = _accelerator_to_simulated_velocity_m_s(state["accelerator"], TORQUE_SIM_MAX_VELOCITY_M_S)
+      velocity, speed_source_name = speed_source.update(state)
       command = torque_controller.update(longitudinal_velocity_m_s=velocity, steering=state["steering"])
       if frame % LOG_INTERVAL_FRAMES == 0:
+        carstate_age = speed_source.last_carstate_age_s
+        carstate_age_text = "none" if carstate_age is None else f"{carstate_age:.3f}s"
         print(
           " ".join((
             "g29d torque_sim",
+            f"speed_source={speed_source_name}",
             f"velocity={velocity:.2f}m/s",
+            f"carstate_age={carstate_age_text}",
             f"factor={command.speed_factor:.2f}",
             f"force_factor={command.force_factor:.2f}",
             f"target={command.target_position:.3f}",
