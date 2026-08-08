@@ -10,6 +10,7 @@ WEBCAM = os.getenv("USE_WEBCAM") is not None
 TURBO_UGV_IP = os.getenv("TURBO_UGV_IP")
 GCS_SIGNALING_PORT = os.getenv("GCS_SIGNALING_PORT")
 GCS_SIGNALING_URL = os.getenv("GCS_SIGNALING_URL")
+TURBO_GCS_CONFIGURED = PC and (TURBO_UGV_IP is not None or GCS_SIGNALING_PORT is not None)
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return ((started and not params.get_bool("GCS")) or params.get_bool("IsDriverViewEnabled")) or livestream(started, params, CP)
@@ -97,7 +98,7 @@ procs = [
   PythonProcess("dmonitoringmodeld", "openpilot.selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
   PythonProcess("sensord", "openpilot.system.sensord.sensord", only_onroad, enabled=not PC),
-  PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, restart_if_crash=True),
+  PythonProcess("ui", "openpilot.selfdrive.ui.ui", always_run, enabled=not TURBO_GCS_CONFIGURED, restart_if_crash=True),
   PythonProcess("soundd", "openpilot.selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "openpilot.selfdrive.locationd.locationd", only_onroad),
   NativeProcess("_pandad", "openpilot/selfdrive/pandad", ["./pandad"], always_run, enabled=False),
@@ -137,8 +138,8 @@ procs = [
                 gcs, enabled=PC and TURBO_UGV_IP is not None and GCS_SIGNALING_PORT is None, restart_if_crash=True),
   PythonProcess("turbo_webrtc_signald", "openpilot.tools.turbo.webrtc_signald",
                 gcs, enabled=PC and GCS_SIGNALING_PORT is not None, restart_if_crash=True),
-  PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_ui", gcs, enabled=PC, restart_if_crash=True),
-  PythonProcess("gcs_debug_ui", "openpilot.selfdrive.ui.ui", gcs, enabled=PC, restart_if_crash=True),
+  PythonProcess("gcs_ui", "openpilot.tools.turbo.gcs_teleop_ui", gcs, enabled=PC, restart_if_crash=True),
+  PythonProcess("gcs_debug_ui", "openpilot.tools.turbo.gcs_debug_ui", gcs, enabled=PC, restart_if_crash=True),
 
   # turbo ugv procs
   PythonProcess("turbo_webrtc_uplink", "openpilot.tools.turbo.webrtc_uplink",
