@@ -8,8 +8,59 @@ import capnp
 from openpilot.cereal import messaging
 
 
-def parse_control_services(services_arg: str) -> list[str]:
+UI_SMOKE_FEEDBACK_SERVICES = [
+  "deviceState",
+  "pandaStates",
+  "selfdriveState",
+  "carState",
+  "controlsState",
+  "roadCameraState",
+  "wideRoadCameraState",
+  "liveCalibration",
+]
+
+UI_MODEL_FEEDBACK_SERVICES = UI_SMOKE_FEEDBACK_SERVICES + [
+  "modelV2",
+  "longitudinalPlan",
+  "radarState",
+  "carParams",
+]
+
+UI_FULL_FEEDBACK_SERVICES = UI_MODEL_FEEDBACK_SERVICES + [
+  "driverMonitoringState",
+  "driverStateV2",
+  "onroadEvents",
+  "liveParameters",
+  "carOutput",
+  "carControl",
+]
+
+FEEDBACK_SERVICE_PROFILES = {
+  "torque": ["carState"],
+  "ui_smoke": UI_SMOKE_FEEDBACK_SERVICES,
+  "ui_model": UI_MODEL_FEEDBACK_SERVICES,
+  "ui_full": UI_FULL_FEEDBACK_SERVICES,
+}
+
+
+def parse_services(services_arg: str) -> list[str]:
   return [service.strip() for service in services_arg.split(",") if service.strip()]
+
+
+def parse_control_services(services_arg: str) -> list[str]:
+  return parse_services(services_arg)
+
+
+def expand_feedback_services(services_arg: str, profile_arg: str = "") -> list[str]:
+  services: list[str] = []
+  for profile in parse_services(profile_arg):
+    if profile not in FEEDBACK_SERVICE_PROFILES:
+      valid = ",".join(FEEDBACK_SERVICE_PROFILES)
+      raise ValueError(f"unknown feedback profile: {profile}; expected one of {valid}")
+    services.extend(FEEDBACK_SERVICE_PROFILES[profile])
+
+  services.extend(parse_services(services_arg))
+  return list(dict.fromkeys(services))
 
 
 def cereal_to_json(msg_content: Any) -> Any:

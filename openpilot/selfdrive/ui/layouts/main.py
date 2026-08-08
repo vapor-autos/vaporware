@@ -6,6 +6,7 @@ from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.layouts.sidebar import Sidebar, SIDEBAR_WIDTH
 from openpilot.selfdrive.ui.layouts.home import HomeLayout
 from openpilot.selfdrive.ui.layouts.settings.settings import SettingsLayout, PanelType
+from openpilot.selfdrive.ui.gcs_camera import gcs_standard_ui_camera
 from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import OnboardingWindow
@@ -31,7 +32,12 @@ class MainLayout(Widget):
     # Initialize layouts
     self._home_layout = HomeLayout()
     self._home_body_layout = BodyLayout()
-    self._layouts = {MainState.HOME: self._home_layout, MainState.SETTINGS: SettingsLayout(), MainState.ONROAD: AugmentedRoadView()}
+    onroad_stream, lock_onroad_stream = gcs_standard_ui_camera(params=ui_state.params)
+    self._layouts = {
+      MainState.HOME: self._home_layout,
+      MainState.SETTINGS: SettingsLayout(),
+      MainState.ONROAD: AugmentedRoadView(stream_type=onroad_stream, lock_stream=lock_onroad_stream),
+    }
 
     self._sidebar_rect = rl.Rectangle(0, 0, 0, 0)
     self._content_rect = rl.Rectangle(0, 0, 0, 0)

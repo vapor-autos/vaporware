@@ -31,8 +31,9 @@ INF_POINT = np.array([1000.0, 0.0, 0.0])
 
 
 class AugmentedRoadView(CameraView):
-  def __init__(self, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD):
+  def __init__(self, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD, lock_stream: bool = False):
     super().__init__("camerad", stream_type)
+    self._lock_stream = lock_stream
     self._set_placeholder_color(BORDER_COLORS[UIStatus.DISENGAGED])
 
     self.device_camera: DeviceCameraConfig | None = None
@@ -53,7 +54,8 @@ class AugmentedRoadView(CameraView):
     if not ui_state.started:
       return
 
-    self._switch_stream_if_needed(ui_state.sm)
+    if not self._lock_stream:
+      self._switch_stream_if_needed(ui_state.sm)
 
     # Update calibration before rendering
     self._update_calibration()
