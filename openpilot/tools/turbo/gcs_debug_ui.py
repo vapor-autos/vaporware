@@ -1,18 +1,36 @@
 import os
 import time
 
+from msgq.visionipc import VisionStreamType
+
 from openpilot.cereal import messaging
 from openpilot.common.hardware import TICI
 from openpilot.common.realtime import Priority, config_realtime_process, set_core_affinity
 from openpilot.tools.turbo.gcs_window import monitor_geometry, patch_undecorated_window, place_window
 
 
+GCS_STANDARD_UI_CAMERA_ENV = "TURBO_GCS_STANDARD_UI_CAMERA"
+
+_CAMERA_STREAMS = {
+  "road": VisionStreamType.VISION_STREAM_ROAD,
+  "wideRoad": VisionStreamType.VISION_STREAM_WIDE_ROAD,
+}
+
+
+def _standard_ui_camera() -> tuple[VisionStreamType, bool]:
+  camera = os.getenv(GCS_STANDARD_UI_CAMERA_ENV, "wideRoad").strip()
+  if camera not in _CAMERA_STREAMS:
+    valid = ",".join(_CAMERA_STREAMS)
+    raise ValueError(f"invalid {GCS_STANDARD_UI_CAMERA_ENV}: {camera}; expected one of {valid}")
+  return _CAMERA_STREAMS[camera], True
+
+
 def main() -> None:
   os.environ.setdefault("BIG", "1")
-  os.environ.setdefault("TURBO_GCS_STANDARD_UI_CAMERA", "wideRoad")
 
   monitor = monitor_geometry(os.getenv("TURBO_GCS_DEBUG_UI_MONITOR", "eDP-1"))
   patch_undecorated_window("TURBO_GCS_DEBUG_UI_DECORATED")
+  onroad_stream, lock_onroad_stream = _standard_ui_camera()
 
   import openpilot.system.ui.lib.application as ui_application
 
@@ -32,7 +50,7 @@ def main() -> None:
   place_window("UI", monitor)
 
   if gui_app.big_ui():
-    MainLayout()
+    MainLayout(onroad_stream=onroad_stream, lock_onroad_stream=lock_onroad_stream)
   else:
     MiciMainLayout()
 

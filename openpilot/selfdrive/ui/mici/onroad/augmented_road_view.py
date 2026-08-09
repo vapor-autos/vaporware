@@ -130,15 +130,9 @@ class BookmarkIcon(Widget):
 
 
 class AugmentedRoadView(CameraView):
-  def __init__(
-    self,
-    bookmark_callback=None,
-    stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD,
-    lock_stream: bool = False,
-  ):
+  def __init__(self, bookmark_callback=None, stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD):
     super().__init__("camerad", stream_type)
     self._bookmark_callback = bookmark_callback
-    self._lock_stream = lock_stream
     self._set_placeholder_color(rl.BLACK)
 
     self.device_camera: DeviceCameraConfig | None = None
@@ -192,8 +186,7 @@ class AugmentedRoadView(CameraView):
       self._offroad_label.render(self._rect)
       return
 
-    if not self._lock_stream:
-      self._switch_stream_if_needed(ui_state.sm)
+    self._switch_stream_if_needed(ui_state.sm)
 
     # Update calibration before rendering
     self._update_calibration()

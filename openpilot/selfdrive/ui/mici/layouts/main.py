@@ -4,7 +4,6 @@ from openpilot.selfdrive.ui.mici.layouts.home import MiciHomeLayout
 from openpilot.selfdrive.ui.mici.layouts.settings.settings import SettingsLayout
 from openpilot.selfdrive.ui.mici.layouts.offroad_alerts import MiciOffroadAlerts
 from openpilot.selfdrive.ui.mici.onroad.augmented_road_view import AugmentedRoadView
-from openpilot.selfdrive.ui.gcs_camera import gcs_standard_ui_camera
 from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.selfdrive.ui.mici.layouts.onboarding import OnboardingWindow
 from openpilot.selfdrive.ui.body.layouts.onroad import BodyLayout
@@ -31,12 +30,7 @@ class MiciMainLayout(Scroller):
     self._home_layout = MiciHomeLayout()
     self._alerts_layout = MiciOffroadAlerts()
     self._settings_layout = SettingsLayout()
-    onroad_stream, lock_onroad_stream = gcs_standard_ui_camera(params=ui_state.params)
-    self._car_onroad_layout = AugmentedRoadView(
-      bookmark_callback=self._on_bookmark_clicked,
-      stream_type=onroad_stream,
-      lock_stream=lock_onroad_stream,
-    )
+    self._car_onroad_layout = AugmentedRoadView(bookmark_callback=self._on_bookmark_clicked)
     self._body_onroad_layout = BodyLayout()
 
     # Initialize widget rects
