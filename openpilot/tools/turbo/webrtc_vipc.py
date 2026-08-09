@@ -4,13 +4,13 @@ import os
 
 from openpilot.tools.turbo.webrtc_client import build_offer, parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, parse_control_services
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, expand_feedback_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 
 
 async def run(args: argparse.Namespace) -> None:
   cameras = parse_cameras(args.cameras)
-  feedback_services = parse_control_services(args.feedback_services)
+  feedback_services = expand_feedback_services(args.feedback_services, args.feedback_profile)
   builder = build_offer(args.host, args.port, cameras, feedback_services=feedback_services)
   if args.quality or feedback_services:
     builder.add_messaging()
@@ -56,6 +56,11 @@ def main() -> None:
     "--feedback-services",
     default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_SERVICES", "carState"),
     help="comma-separated UGV msgq services to receive over the WebRTC data channel and republish locally",
+  )
+  parser.add_argument(
+    "--feedback-profile",
+    default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_PROFILE", ""),
+    help="comma-separated named UGV feedback profiles to receive over the WebRTC data channel",
   )
   parser.add_argument(
     "--quality",

@@ -19,7 +19,7 @@ class MainState(IntEnum):
 
 
 class MainLayout(Widget):
-  def __init__(self):
+  def __init__(self, onroad_layout: Widget | None = None):
     super().__init__()
 
     self._pm = messaging.PubMaster(['bookmarkButton'])
@@ -31,7 +31,11 @@ class MainLayout(Widget):
     # Initialize layouts
     self._home_layout = HomeLayout()
     self._home_body_layout = BodyLayout()
-    self._layouts = {MainState.HOME: self._home_layout, MainState.SETTINGS: SettingsLayout(), MainState.ONROAD: AugmentedRoadView()}
+    self._layouts = {
+      MainState.HOME: self._home_layout,
+      MainState.SETTINGS: SettingsLayout(),
+      MainState.ONROAD: onroad_layout or AugmentedRoadView(),
+    }
 
     self._sidebar_rect = rl.Rectangle(0, 0, 0, 0)
     self._content_rect = rl.Rectangle(0, 0, 0, 0)

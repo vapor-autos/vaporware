@@ -10,7 +10,7 @@ import aiortc
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, CerealDataChannelSender, parse_control_services
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, CerealDataChannelSender, expand_feedback_services, parse_control_services
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
@@ -57,7 +57,7 @@ class SignalingSession:
     self.args = args
     self.cameras = cameras
     self.control_services = parse_control_services(args.control_services)
-    self.feedback_services = parse_control_services(args.feedback_services)
+    self.feedback_services = expand_feedback_services(args.feedback_services, args.feedback_profile)
     self.session_id = uuid.uuid4().hex
     self.provider = GcsAnswerProvider(self.session_id, cameras, self.control_services, self.feedback_services)
     builder = WebRTCOfferBuilder(self.provider)
@@ -243,6 +243,11 @@ def main() -> None:
     "--feedback-services",
     default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_SERVICES", "carState"),
     help="comma-separated UGV msgq services to receive over the WebRTC data channel and republish locally",
+  )
+  parser.add_argument(
+    "--feedback-profile",
+    default=os.getenv("TURBO_GCS_WEBRTC_FEEDBACK_PROFILE", ""),
+    help="comma-separated named UGV feedback profiles to receive over the WebRTC data channel",
   )
   parser.add_argument(
     "--control-max-buffered-amount",

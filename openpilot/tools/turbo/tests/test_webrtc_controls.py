@@ -1,6 +1,8 @@
 import json
 
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver
+import pytest
+
+from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, expand_feedback_services
 
 
 class AiortcChannel:
@@ -21,6 +23,42 @@ def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
   sender = CerealDataChannelSender(["g29"], AiortcChannel())
 
   assert sender.buffered_amount() == 123
+
+
+def test_expand_feedback_services_accepts_explicit_services():
+  assert expand_feedback_services("carState, deviceState") == ["carState", "deviceState"]
+
+
+def test_expand_feedback_services_accepts_ui_smoke_profile():
+  assert expand_feedback_services("", "ui_smoke") == [
+    "deviceState",
+    "pandaStates",
+    "selfdriveState",
+    "carState",
+    "controlsState",
+    "roadCameraState",
+    "wideRoadCameraState",
+    "liveCalibration",
+  ]
+
+
+def test_expand_feedback_services_combines_and_deduplicates():
+  assert expand_feedback_services("carState,modelV2", "torque,ui_smoke") == [
+    "carState",
+    "deviceState",
+    "pandaStates",
+    "selfdriveState",
+    "controlsState",
+    "roadCameraState",
+    "wideRoadCameraState",
+    "liveCalibration",
+    "modelV2",
+  ]
+
+
+def test_expand_feedback_services_rejects_unknown_profile():
+  with pytest.raises(ValueError, match="unknown feedback profile"):
+    expand_feedback_services("", "unknown")
 
 
 def test_cereal_data_channel_receiver_publishes_allowlisted_car_state():
