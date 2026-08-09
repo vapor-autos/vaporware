@@ -10,7 +10,6 @@ from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
 from openpilot.selfdrive.ui.ui_state import device, ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import OnboardingWindow
 from openpilot.selfdrive.ui.body.layouts.onroad import BodyLayout
-from msgq.visionipc import VisionStreamType
 
 
 class MainState(IntEnum):
@@ -20,11 +19,7 @@ class MainState(IntEnum):
 
 
 class MainLayout(Widget):
-  def __init__(
-    self,
-    onroad_stream: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD,
-    lock_onroad_stream: bool = False,
-  ):
+  def __init__(self, onroad_layout: Widget | None = None):
     super().__init__()
 
     self._pm = messaging.PubMaster(['bookmarkButton'])
@@ -39,7 +34,7 @@ class MainLayout(Widget):
     self._layouts = {
       MainState.HOME: self._home_layout,
       MainState.SETTINGS: SettingsLayout(),
-      MainState.ONROAD: AugmentedRoadView(stream_type=onroad_stream, lock_stream=lock_onroad_stream),
+      MainState.ONROAD: onroad_layout or AugmentedRoadView(),
     }
 
     self._sidebar_rect = rl.Rectangle(0, 0, 0, 0)

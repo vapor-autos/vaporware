@@ -17,12 +17,12 @@ _CAMERA_STREAMS = {
 }
 
 
-def _standard_ui_camera() -> tuple[VisionStreamType, bool]:
+def _standard_ui_camera() -> VisionStreamType:
   camera = os.getenv(GCS_STANDARD_UI_CAMERA_ENV, "wideRoad").strip()
   if camera not in _CAMERA_STREAMS:
     valid = ",".join(_CAMERA_STREAMS)
     raise ValueError(f"invalid {GCS_STANDARD_UI_CAMERA_ENV}: {camera}; expected one of {valid}")
-  return _CAMERA_STREAMS[camera], True
+  return _CAMERA_STREAMS[camera]
 
 
 def main() -> None:
@@ -30,7 +30,7 @@ def main() -> None:
 
   monitor = monitor_geometry(os.getenv("TURBO_GCS_DEBUG_UI_MONITOR", "eDP-1"))
   patch_undecorated_window("TURBO_GCS_DEBUG_UI_DECORATED")
-  onroad_stream, lock_onroad_stream = _standard_ui_camera()
+  onroad_stream = _standard_ui_camera()
 
   import openpilot.system.ui.lib.application as ui_application
 
@@ -39,6 +39,7 @@ def main() -> None:
 
   from openpilot.selfdrive.ui.layouts.main import MainLayout
   from openpilot.selfdrive.ui.mici.layouts.main import MiciMainLayout
+  from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
   from openpilot.selfdrive.ui.ui_state import ui_state
 
   gui_app = ui_application.gui_app
@@ -50,7 +51,7 @@ def main() -> None:
   place_window("UI", monitor)
 
   if gui_app.big_ui():
-    MainLayout(onroad_stream=onroad_stream, lock_onroad_stream=lock_onroad_stream)
+    MainLayout(onroad_layout=AugmentedRoadView(stream_type=onroad_stream, auto_switch_stream=False))
   else:
     MiciMainLayout()
 
