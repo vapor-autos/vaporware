@@ -6,6 +6,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import log
 from openpilot.common.params import Params
 from openpilot.selfdrive.locationd.calibrationd import Calibrator, INPUTS_NEEDED, INPUTS_WANTED, BLOCK_SIZE, MIN_SPEED_FILTER, \
+                                                         TURBO_MIN_SPEED_FILTER, \
                                                          MAX_YAW_RATE_FILTER, SMOOTH_CYCLES, HEIGHT_INIT, MAX_ALLOWED_PITCH_SPREAD, MAX_ALLOWED_YAW_SPREAD
 
 
@@ -60,6 +61,21 @@ class TestCalibrationd:
     assert c.valid_blocks == 0
     np.testing.assert_allclose(c.rpy, np.zeros(3))
     np.testing.assert_allclose(c.height, HEIGHT_INIT)
+
+
+  def test_calibration_turbo_low_speed(self):
+    c = Calibrator(param_put=False, min_speed_filter=TURBO_MIN_SPEED_FILTER)
+    process_messages(c, [0.0, 0.0, 0.0], BLOCK_SIZE * INPUTS_NEEDED,
+                     cam_odo_speed=TURBO_MIN_SPEED_FILTER + 0.1,
+                     carstate_speed=TURBO_MIN_SPEED_FILTER + 0.1)
+    assert c.valid_blocks == INPUTS_NEEDED
+    assert c.cal_status == log.LiveCalibrationData.Status.calibrated
+
+    c = Calibrator(param_put=False, min_speed_filter=TURBO_MIN_SPEED_FILTER)
+    process_messages(c, [0.0, 0.0, 0.0], BLOCK_SIZE * INPUTS_WANTED,
+                     cam_odo_speed=TURBO_MIN_SPEED_FILTER - 0.1,
+                     carstate_speed=TURBO_MIN_SPEED_FILTER - 0.1)
+    assert c.valid_blocks == 0
 
 
   def test_calibration_yaw_rate_reject(self):

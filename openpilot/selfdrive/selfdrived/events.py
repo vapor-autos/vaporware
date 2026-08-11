@@ -11,7 +11,7 @@ import openpilot.cereal.messaging as messaging
 from openpilot.common.constants import CV
 from openpilot.common.git import get_short_branch
 from openpilot.common.realtime import DT_CTRL, DT_DMON
-from openpilot.selfdrive.locationd.calibrationd import MIN_SPEED_FILTER
+from openpilot.selfdrive.locationd.calibrationd import get_min_speed_filter
 from openpilot.selfdrive.monitoring.policy import DRIVER_MONITOR_SETTINGS
 from openpilot.system.micd import SAMPLE_RATE, SAMPLE_BUFFER
 from openpilot.selfdrive.ui.feedback.feedbackd import FEEDBACK_MAX_DURATION
@@ -262,7 +262,7 @@ def calibration_incomplete_alert(CP: car.CarParams, CS: car.CarState, sm: messag
   first_word = 'Recalibrating' if sm['liveCalibration'].calStatus == log.LiveCalibrationData.Status.recalibrating else 'Calibrating'
   return Alert(
     f"{first_word}: {sm['liveCalibration'].calPerc:.0f}%",
-    f"Drive Above {get_display_speed(MIN_SPEED_FILTER, metric)}",
+    f"Drive Above {get_display_speed(get_min_speed_filter(CP), metric)}",
     AlertStatus.normal, AlertSize.mid,
     Priority.LOWEST, VisualAlert.none, AudibleAlert.none, .2)
 
