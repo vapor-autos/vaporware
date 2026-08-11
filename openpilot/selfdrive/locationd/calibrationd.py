@@ -22,6 +22,8 @@ from openpilot.common.transformations.orientation import rot_from_euler, euler_f
 from openpilot.common.swaglog import cloudlog
 
 MIN_SPEED_FILTER = 15 * CV.MPH_TO_MS
+TURBO_MIN_SPEED_FILTER = 8 * CV.MPH_TO_MS
+TURBO_CAR_FINGERPRINT = "TURBO_RC_CAR"
 MAX_VEL_ANGLE_STD = np.radians(0.25)
 MAX_YAW_RATE_FILTER = np.radians(2)  # per second
 
@@ -47,6 +49,12 @@ YAW_LIMITS = np.array([-0.06912048084718224, 0.06912048084718235])
 DEBUG = os.getenv("DEBUG") is not None
 
 
+def get_min_speed_filter(CP=None) -> float:
+  if CP is not None and CP.carFingerprint == TURBO_CAR_FINGERPRINT:
+    return TURBO_MIN_SPEED_FILTER
+  return MIN_SPEED_FILTER
+
+
 def is_calibration_valid(rpy: np.ndarray) -> bool:
   return (PITCH_LIMITS[0] < rpy[1] < PITCH_LIMITS[1]) and (YAW_LIMITS[0] < rpy[2] < YAW_LIMITS[1])
 
@@ -62,8 +70,9 @@ def moving_avg_with_linear_decay(prev_mean: np.ndarray, new_val: np.ndarray, idx
   return (idx*prev_mean + (block_size - idx) * new_val) / block_size
 
 class Calibrator:
-  def __init__(self, param_put: bool = False):
+  def __init__(self, param_put: bool = False, min_speed_filter: float = MIN_SPEED_FILTER):
     self.param_put = param_put
+    self.min_speed_filter = min_speed_filter
 
     self.not_car = False
 
@@ -187,7 +196,9 @@ class Calibrator:
                             road_transform_trans_std: list[float]) -> np.ndarray | None:
     self.old_rpy_weight = max(0.0, self.old_rpy_weight - 1/SMOOTH_CYCLES)
 
-    straight_and_fast = ((self.v_ego > MIN_SPEED_FILTER) and (trans[0] > MIN_SPEED_FILTER) and (abs(rot[2]) < MAX_YAW_RATE_FILTER))
+    straight_and_fast = ((self.v_ego > self.min_speed_filter) and
+                         (trans[0] > self.min_speed_filter) and
+                         (abs(rot[2]) < MAX_YAW_RATE_FILTER))
     angle_std_threshold = MAX_VEL_ANGLE_STD
     height_std_threshold = MAX_HEIGHT_STD
     rpy_certain = np.arctan2(trans_std[1], trans[0]) < angle_std_threshold
@@ -268,7 +279,7 @@ def main() -> NoReturn:
   params_reader = Params()
   CP = messaging.log_from_bytes(params_reader.get("CarParams", block=True), car.CarParams)
 
-  calibrator = Calibrator(param_put=True)
+  calibrator = Calibrator(param_put=True, min_speed_filter=get_min_speed_filter(CP))
   calibrator.not_car = CP.notCar
 
   while 1:
