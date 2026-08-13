@@ -21,7 +21,6 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning) # TODO: remove this when google-crc32c publish a python3.12 wheel
 
-import capnp
 if TYPE_CHECKING:
   from aiortc.rtcdatachannel import RTCDataChannel
 import aioice.ice
@@ -30,6 +29,7 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
+from openpilot.tools.turbo.webrtc_controls import project_feedback_message
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -85,9 +85,20 @@ class AsyncTaskRunner:
 
 FEEDBACK_SERVICE_RATES_HZ = {
   "carState": 20.0,
+  "selfdriveState": 20.0,
+  "controlsState": 20.0,
   "modelV2": 2.0,
+  "deviceState": 2.0,
+  "liveCalibration": 4.0,
+  "liveParameters": 5.0,
+  "onroadEvents": 5.0,
 }
 FEEDBACK_DEFAULT_RATE_HZ = 10.0
+FEEDBACK_SERVICE_PRIORITIES = {
+  "carState": 0,
+  "selfdriveState": 1,
+  "controlsState": 2,
+}
 
 
 class CerealOutgoingMessageProxy(AsyncTaskRunner):
@@ -99,7 +110,12 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     default_rate_hz: float = FEEDBACK_DEFAULT_RATE_HZ,
   ):
     super().__init__()
-    self.services = sorted(services, key=lambda service: service != "carState")
+    self.services = [
+      service for _, service in sorted(
+        enumerate(services),
+        key=lambda item: (FEEDBACK_SERVICE_PRIORITIES.get(item[1], len(FEEDBACK_SERVICE_PRIORITIES)), item[0]),
+      )
+    ]
     self.sm = messaging.SubMaster(self.services)
     self.channels: list[RTCDataChannel] = []
     self._enabled = enabled
@@ -113,18 +129,6 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
 
   def enable(self, enable: bool):
     self._enabled = enable
-
-  def to_json(self, msg_content: Any):
-    if isinstance(msg_content, (capnp._DynamicStructReader, capnp._DynamicStructBuilder)):
-      msg_dict = msg_content.to_dict()
-    elif isinstance(msg_content, (capnp._DynamicListReader, capnp._DynamicListBuilder)):
-      msg_dict = [self.to_json(msg) for msg in msg_content]
-    elif isinstance(msg_content, bytes):
-      msg_dict = msg_content.decode()
-    else:
-      msg_dict = msg_content
-
-    return msg_dict
 
   def should_send(self, service: str, now: float) -> bool:
     rate_hz = self.service_rates_hz.get(service, self.default_rate_hz)
@@ -145,7 +149,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         continue
       if not self.should_send(service, now):
         continue
-      msg_dict = self.to_json(self.sm[service])
+      msg_dict = project_feedback_message(service, self.sm[service])
       mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
       outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
       encoded_msg = json.dumps(outgoing_msg).encode()

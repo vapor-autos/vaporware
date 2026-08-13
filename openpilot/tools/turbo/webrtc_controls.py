@@ -21,16 +21,16 @@ UI_SMOKE_FEEDBACK_SERVICES = [
 
 UI_MODEL_FEEDBACK_SERVICES = UI_SMOKE_FEEDBACK_SERVICES + [
   "modelV2",
-  "longitudinalPlan",
-  "radarState",
   "carParams",
+  "liveParameters",
+  "onroadEvents",
 ]
 
 UI_FULL_FEEDBACK_SERVICES = UI_MODEL_FEEDBACK_SERVICES + [
+  "longitudinalPlan",
+  "radarState",
   "driverMonitoringState",
   "driverStateV2",
-  "onroadEvents",
-  "liveParameters",
   "carOutput",
   "carControl",
 ]
@@ -73,12 +73,47 @@ def cereal_to_json(msg_content: Any) -> Any:
   return msg_content
 
 
+def model_v2_ui_projection(model: dict[str, Any]) -> dict[str, Any]:
+  def as_dict(data: Any) -> dict[str, Any]:
+    return data if isinstance(data, dict) else {}
+
+  def xyz(data: Any) -> dict[str, Any]:
+    data = as_dict(data)
+    return {axis: data.get(axis, []) for axis in ("x", "y", "z")}
+
+  meta = as_dict(model.get("meta", {}))
+  disengage_predictions = as_dict(meta.get("disengagePredictions", {}))
+  acceleration = as_dict(model.get("acceleration", {}))
+
+  return {
+    "position": xyz(model.get("position", {})),
+    "laneLines": [xyz(lane_line) for lane_line in model.get("laneLines", [])],
+    "roadEdges": [xyz(road_edge) for road_edge in model.get("roadEdges", [])],
+    "laneLineProbs": model.get("laneLineProbs", []),
+    "roadEdgeStds": model.get("roadEdgeStds", []),
+    "acceleration": {"x": acceleration.get("x", [])},
+    "meta": {
+      "disengagePredictions": {
+        "brakeDisengageProbs": disengage_predictions.get("brakeDisengageProbs", []),
+        "steerOverrideProbs": disengage_predictions.get("steerOverrideProbs", []),
+      },
+    },
+  }
+
+
+def project_feedback_message(service: str, msg_content: Any) -> Any:
+  msg_dict = cereal_to_json(msg_content)
+  if service == "modelV2" and isinstance(msg_dict, dict):
+    return model_v2_ui_projection(msg_dict)
+  return msg_dict
+
+
 def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   msg = {
     "type": service,
     "logMonoTime": sm.logMonoTime[service],
     "valid": sm.valid[service],
-    "data": cereal_to_json(sm[service]),
+    "data": project_feedback_message(service, sm[service]),
   }
   return json.dumps(msg).encode()
 

@@ -70,7 +70,12 @@ class TestStreamSession:
     proxy.update()
 
     sent_types = [json.loads(call.args[0])["type"] for call in channel.send.call_args_list]
-    assert sent_types == ["carState", "selfdriveState", "carState", "carState", "selfdriveState"]
+    assert sent_types == ["carState", "selfdriveState", "carState", "selfdriveState", "carState", "selfdriveState"]
+
+  def test_outgoing_proxy_prioritizes_critical_feedback(self):
+    proxy = CerealOutgoingMessageProxy(["modelV2", "controlsState", "deviceState", "selfdriveState", "carState"])
+
+    assert proxy.services == ["carState", "selfdriveState", "controlsState", "modelV2", "deviceState"]
 
   def test_outgoing_proxy_keeps_pending_message_until_rate_limit_opens(self, mocker):
     car_state_msg = messaging.new_message("carState")
