@@ -113,6 +113,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     default_rate_hz: float = FEEDBACK_DEFAULT_RATE_HZ,
     max_buffered_amount: int = FEEDBACK_MAX_BUFFERED_AMOUNT,
     log_interval: float = FEEDBACK_LOG_INTERVAL,
+    log_stats: bool = False,
   ):
     super().__init__()
     self.services = [
@@ -128,6 +129,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self.default_rate_hz = default_rate_hz
     self.max_buffered_amount = max_buffered_amount
     self.log_interval = log_interval
+    self.log_stats_enabled = log_stats
     self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
     self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
@@ -203,6 +205,12 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     )
     self.max_observed_buffered_amount = self.buffered_amount()
 
+  def maybe_log_stats(self, now: float, last_log: float) -> float:
+    if self.log_stats_enabled and now - last_log >= self.log_interval:
+      self.log_stats()
+      return now
+    return last_log
+
   async def run(self):
     from aiortc.exceptions import InvalidStateError
 
@@ -213,10 +221,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         continue
       try:
         self.update()
-        now = time.monotonic()
-        if now - last_log >= self.log_interval:
-          self.log_stats()
-          last_log = now
+        last_log = self.maybe_log_stats(time.monotonic(), last_log)
       except InvalidStateError:
         self.logger.warning("Cereal outgoing proxy invalid state (connection closed)")
         break
@@ -440,10 +445,12 @@ class StreamSession:
     if len(body.bridge_services_in) > 0:
       self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
     if len(body.bridge_services_out) > 0:
+      webrtc_stats_enabled = os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on")
       self.outgoing_bridge = CerealOutgoingMessageProxy(
         body.bridge_services_out,
         self.enabled,
         max_buffered_amount=int(os.getenv("TURBO_WEBRTCD_FEEDBACK_MAX_BUFFERED_AMOUNT", str(FEEDBACK_MAX_BUFFERED_AMOUNT))),
+        log_stats=webrtc_stats_enabled,
       )
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
     if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):

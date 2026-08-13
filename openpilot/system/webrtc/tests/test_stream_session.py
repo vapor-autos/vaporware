@@ -139,6 +139,20 @@ class TestStreamSession:
     channel.send.assert_called_once()
     assert not proxy.pending_send["carState"]
 
+  def test_outgoing_proxy_feedback_stats_logging_is_opt_in(self, mocker):
+    proxy = CerealOutgoingMessageProxy(["carState"])
+    log_stats = mocker.patch.object(proxy, "log_stats")
+
+    assert proxy.maybe_log_stats(now=106.0, last_log=100.0) == 100.0
+    log_stats.assert_not_called()
+
+  def test_outgoing_proxy_logs_feedback_stats_when_enabled(self, mocker):
+    proxy = CerealOutgoingMessageProxy(["carState"], log_stats=True)
+    log_stats = mocker.patch.object(proxy, "log_stats")
+
+    assert proxy.maybe_log_stats(now=106.0, last_log=100.0) == 106.0
+    log_stats.assert_called_once()
+
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
       {"type": "customReservedRawData0", "data": "test"}, # primitive

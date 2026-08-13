@@ -74,6 +74,8 @@ def cereal_to_json(msg_content: Any) -> Any:
 
 
 def model_v2_ui_projection(model: dict[str, Any]) -> dict[str, Any]:
+  # The GCS debug UI only needs renderer fields; omit large model/debug fields
+  # to keep the reliable ordered LTE data channel from backing up.
   def as_dict(data: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
