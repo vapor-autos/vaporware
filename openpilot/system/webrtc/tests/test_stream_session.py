@@ -43,6 +43,63 @@ class TestStreamSession:
 
     channel.send.assert_called_once_with(expected_json)
 
+  def test_outgoing_proxy_rate_limits_feedback(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    state_msg = messaging.new_message("selfdriveState")
+    state_msg.logMonoTime = 456
+    state_msg.valid = True
+    state_msg.selfdriveState.enabled = True
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    proxy = CerealOutgoingMessageProxy(["selfdriveState", "carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [state_msg, car_state_msg])
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.time.monotonic", side_effect=[100.0, 100.02, 100.06, 100.12])
+    proxy.add_channel(channel)
+
+    proxy.update()
+    proxy.update()
+    proxy.update()
+    proxy.update()
+
+    sent_types = [json.loads(call.args[0])["type"] for call in channel.send.call_args_list]
+    assert sent_types == ["carState", "selfdriveState", "carState", "carState", "selfdriveState"]
+
+  def test_outgoing_proxy_keeps_pending_message_until_rate_limit_opens(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    proxy = CerealOutgoingMessageProxy(["carState"])
+    update_count = 0
+
+    def mocked_update(t):
+      nonlocal update_count
+      update_count += 1
+      if update_count <= 2:
+        proxy.sm.update_msgs(0, [car_state_msg])
+      else:
+        proxy.sm.updated["carState"] = False
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.time.monotonic", side_effect=[100.0, 100.049, 100.051])
+    proxy.add_channel(channel)
+
+    proxy.update()
+    proxy.update()
+    proxy.update()
+
+    assert channel.send.call_count == 2
+
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
       {"type": "customReservedRawData0", "data": "test"}, # primitive
@@ -83,4 +140,3 @@ class TestStreamSession:
         start_pts = packet.pts
       assert abs(i + packet.pts - (start_pts + (((time.monotonic_ns() - start_ns) * VIDEO_CLOCK_RATE) // 1_000_000_000))) < 450 #5ms
       assert packet.size == 0
-

@@ -83,13 +83,30 @@ class AsyncTaskRunner:
     pass
 
 
+FEEDBACK_SERVICE_RATES_HZ = {
+  "carState": 20.0,
+  "modelV2": 2.0,
+}
+FEEDBACK_DEFAULT_RATE_HZ = 10.0
+
+
 class CerealOutgoingMessageProxy(AsyncTaskRunner):
-  def __init__(self, services: list[str], enabled: bool = True):
+  def __init__(
+    self,
+    services: list[str],
+    enabled: bool = True,
+    service_rates_hz: dict[str, float] | None = None,
+    default_rate_hz: float = FEEDBACK_DEFAULT_RATE_HZ,
+  ):
     super().__init__()
-    self.services = list(services)
+    self.services = sorted(services, key=lambda service: service != "carState")
     self.sm = messaging.SubMaster(self.services)
     self.channels: list[RTCDataChannel] = []
     self._enabled = enabled
+    self.service_rates_hz = FEEDBACK_SERVICE_RATES_HZ if service_rates_hz is None else service_rates_hz
+    self.default_rate_hz = default_rate_hz
+    self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
+    self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -98,9 +115,9 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self._enabled = enable
 
   def to_json(self, msg_content: Any):
-    if isinstance(msg_content, capnp._DynamicStructReader):
+    if isinstance(msg_content, (capnp._DynamicStructReader, capnp._DynamicStructBuilder)):
       msg_dict = msg_content.to_dict()
-    elif isinstance(msg_content, capnp._DynamicListReader):
+    elif isinstance(msg_content, (capnp._DynamicListReader, capnp._DynamicListBuilder)):
       msg_dict = [self.to_json(msg) for msg in msg_content]
     elif isinstance(msg_content, bytes):
       msg_dict = msg_content.decode()
@@ -109,11 +126,24 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
 
     return msg_dict
 
+  def should_send(self, service: str, now: float) -> bool:
+    rate_hz = self.service_rates_hz.get(service, self.default_rate_hz)
+    if rate_hz <= 0:
+      return True
+
+    last_send_time = self.last_send_time.get(service, 0.0)
+    return now - last_send_time >= 1.0 / rate_hz
+
   def update(self):
     # this is blocking in async context...
     self.sm.update(0)
-    for service, updated in self.sm.updated.items():
-      if not updated:
+    now = time.monotonic()
+    for service in self.services:
+      if self.sm.updated[service]:
+        self.pending_send[service] = True
+      if not self.pending_send[service]:
+        continue
+      if not self.should_send(service, now):
         continue
       msg_dict = self.to_json(self.sm[service])
       mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
@@ -121,6 +151,8 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
       encoded_msg = json.dumps(outgoing_msg).encode()
       for channel in self.channels:
         channel.send(encoded_msg)
+      self.last_send_time[service] = now
+      self.pending_send[service] = False
 
   async def run(self):
     from aiortc.exceptions import InvalidStateError
