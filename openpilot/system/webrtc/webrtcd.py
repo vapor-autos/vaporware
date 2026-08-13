@@ -94,10 +94,13 @@ FEEDBACK_SERVICE_RATES_HZ = {
   "onroadEvents": 5.0,
 }
 FEEDBACK_DEFAULT_RATE_HZ = 10.0
+FEEDBACK_MAX_BUFFERED_AMOUNT = 16 * 1024
+FEEDBACK_LOG_INTERVAL = 5.0
 FEEDBACK_SERVICE_PRIORITIES = {
   "carState": 0,
   "selfdriveState": 1,
   "controlsState": 2,
+  "onroadEvents": 3,
 }
 
 
@@ -108,6 +111,8 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     enabled: bool = True,
     service_rates_hz: dict[str, float] | None = None,
     default_rate_hz: float = FEEDBACK_DEFAULT_RATE_HZ,
+    max_buffered_amount: int = FEEDBACK_MAX_BUFFERED_AMOUNT,
+    log_interval: float = FEEDBACK_LOG_INTERVAL,
   ):
     super().__init__()
     self.services = [
@@ -121,8 +126,14 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self._enabled = enabled
     self.service_rates_hz = FEEDBACK_SERVICE_RATES_HZ if service_rates_hz is None else service_rates_hz
     self.default_rate_hz = default_rate_hz
+    self.max_buffered_amount = max_buffered_amount
+    self.log_interval = log_interval
     self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
+    self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.max_observed_buffered_amount = 0
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -137,6 +148,17 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
 
     last_send_time = self.last_send_time.get(service, 0.0)
     return now - last_send_time >= 1.0 / rate_hz
+
+  def buffered_amount(self) -> int:
+    if not self.channels:
+      return 0
+    buffered_amounts = []
+    for channel in self.channels:
+      try:
+        buffered_amounts.append(int(getattr(channel, "bufferedAmount", 0)))
+      except (TypeError, ValueError):
+        buffered_amounts.append(0)
+    return max(buffered_amounts)
 
   def update(self):
     # this is blocking in async context...
@@ -153,20 +175,48 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
       mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
       outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
       encoded_msg = json.dumps(outgoing_msg).encode()
+
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        self.skipped[service] += 1
+        continue
+
       for channel in self.channels:
         channel.send(encoded_msg)
       self.last_send_time[service] = now
       self.pending_send[service] = False
+      self.sent[service] += 1
+      self.sent_bytes[service] += len(encoded_msg)
+
+  def log_stats(self):
+    sent_counts = " ".join(f"{service}={count}" for service, count in self.sent.items())
+    skipped_counts = " ".join(f"{service}={count}" for service, count in self.skipped.items())
+    sent_kb = " ".join(f"{service}={bytes_sent / 1024.0:.1f}" for service, bytes_sent in self.sent_bytes.items())
+    self.logger.info(
+      "feedback bridge sent %s skipped %s sent_kb %s buffered=%s buffered_max=%s",
+      sent_counts,
+      skipped_counts,
+      sent_kb,
+      self.buffered_amount(),
+      self.max_observed_buffered_amount,
+    )
+    self.max_observed_buffered_amount = self.buffered_amount()
 
   async def run(self):
     from aiortc.exceptions import InvalidStateError
 
+    last_log = time.monotonic()
     while True:
       if not self._enabled:
         await asyncio.sleep(0.01)
         continue
       try:
         self.update()
+        now = time.monotonic()
+        if now - last_log >= self.log_interval:
+          self.log_stats()
+          last_log = now
       except InvalidStateError:
         self.logger.warning("Cereal outgoing proxy invalid state (connection closed)")
         break
@@ -390,7 +440,11 @@ class StreamSession:
     if len(body.bridge_services_in) > 0:
       self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
     if len(body.bridge_services_out) > 0:
-      self.outgoing_bridge = CerealOutgoingMessageProxy(body.bridge_services_out, self.enabled)
+      self.outgoing_bridge = CerealOutgoingMessageProxy(
+        body.bridge_services_out,
+        self.enabled,
+        max_buffered_amount=int(os.getenv("TURBO_WEBRTCD_FEEDBACK_MAX_BUFFERED_AMOUNT", str(FEEDBACK_MAX_BUFFERED_AMOUNT))),
+      )
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
     if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
       self.stats_logger = WebRTCStatsLogger(

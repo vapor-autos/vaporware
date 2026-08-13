@@ -105,6 +105,40 @@ class TestStreamSession:
 
     assert channel.send.call_count == 2
 
+  def test_outgoing_proxy_keeps_pending_message_until_data_channel_drains(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.bufferedAmount = 20
+    proxy = CerealOutgoingMessageProxy(["carState"], max_buffered_amount=10)
+    update_count = 0
+
+    def mocked_update(t):
+      nonlocal update_count
+      update_count += 1
+      if update_count == 1:
+        proxy.sm.update_msgs(0, [car_state_msg])
+      else:
+        proxy.sm.updated["carState"] = False
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    proxy.add_channel(channel)
+
+    proxy.update()
+
+    channel.send.assert_not_called()
+    assert proxy.pending_send["carState"]
+    assert proxy.skipped["carState"] == 1
+
+    channel.bufferedAmount = 0
+    proxy.update()
+
+    channel.send.assert_called_once()
+    assert not proxy.pending_send["carState"]
+
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
       {"type": "customReservedRawData0", "data": "test"}, # primitive
