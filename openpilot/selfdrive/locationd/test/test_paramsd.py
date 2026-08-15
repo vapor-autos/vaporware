@@ -2,7 +2,12 @@ import random
 import numpy as np
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.locationd.paramsd import retrieve_initial_vehicle_params, migrate_cached_vehicle_params_if_needed
+from opendbc.car.structs import car
+from openpilot.selfdrive.locationd.paramsd import (
+  get_offset_validity_thresholds,
+  migrate_cached_vehicle_params_if_needed,
+  retrieve_initial_vehicle_params,
+)
 from openpilot.selfdrive.locationd.models.car_kf import CarKalman
 from openpilot.selfdrive.locationd.test.test_locationd_scenarios import TEST_ROUTE
 from openpilot.selfdrive.test.process_replay.migration import migrate, migrate_carParams
@@ -20,6 +25,15 @@ def get_random_live_parameters(CP):
 
 
 class TestParamsd:
+  def test_turbo_offset_validity_thresholds(self):
+    CP = car.CarParams.new_message()
+
+    CP.brand = "toyota"
+    assert get_offset_validity_thresholds(CP) == (10.0, 8.0)
+
+    CP.brand = "turbo"
+    assert get_offset_validity_thresholds(CP) == (20.0, 16.0)
+
   def test_read_saved_params(self):
     params = Params()
 
