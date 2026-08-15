@@ -21,7 +21,6 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning) # TODO: remove this when google-crc32c publish a python3.12 wheel
 
-import capnp
 if TYPE_CHECKING:
   from aiortc.rtcdatachannel import RTCDataChannel
 import aioice.ice
@@ -30,6 +29,7 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
+from openpilot.tools.turbo.webrtc_controls import project_feedback_message
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -83,13 +83,59 @@ class AsyncTaskRunner:
     pass
 
 
+FEEDBACK_SERVICE_RATES_HZ = {
+  "carState": 20.0,
+  "selfdriveState": 20.0,
+  "controlsState": 20.0,
+  "modelV2": 2.0,
+  "deviceState": 2.0,
+  "liveCalibration": 4.0,
+  "liveParameters": 5.0,
+  "onroadEvents": 5.0,
+}
+FEEDBACK_DEFAULT_RATE_HZ = 10.0
+FEEDBACK_MAX_BUFFERED_AMOUNT = 16 * 1024
+FEEDBACK_LOG_INTERVAL = 5.0
+FEEDBACK_SERVICE_PRIORITIES = {
+  "carState": 0,
+  "selfdriveState": 1,
+  "controlsState": 2,
+  "onroadEvents": 3,
+}
+
+
 class CerealOutgoingMessageProxy(AsyncTaskRunner):
-  def __init__(self, services: list[str], enabled: bool = True):
+  def __init__(
+    self,
+    services: list[str],
+    enabled: bool = True,
+    service_rates_hz: dict[str, float] | None = None,
+    default_rate_hz: float = FEEDBACK_DEFAULT_RATE_HZ,
+    max_buffered_amount: int = FEEDBACK_MAX_BUFFERED_AMOUNT,
+    log_interval: float = FEEDBACK_LOG_INTERVAL,
+    log_stats: bool = False,
+  ):
     super().__init__()
-    self.services = list(services)
+    self.services = [
+      service for _, service in sorted(
+        enumerate(services),
+        key=lambda item: (FEEDBACK_SERVICE_PRIORITIES.get(item[1], len(FEEDBACK_SERVICE_PRIORITIES)), item[0]),
+      )
+    ]
     self.sm = messaging.SubMaster(self.services)
     self.channels: list[RTCDataChannel] = []
     self._enabled = enabled
+    self.service_rates_hz = FEEDBACK_SERVICE_RATES_HZ if service_rates_hz is None else service_rates_hz
+    self.default_rate_hz = default_rate_hz
+    self.max_buffered_amount = max_buffered_amount
+    self.log_interval = log_interval
+    self.log_stats_enabled = log_stats
+    self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
+    self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
+    self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.max_observed_buffered_amount = 0
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -97,40 +143,85 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
   def enable(self, enable: bool):
     self._enabled = enable
 
-  def to_json(self, msg_content: Any):
-    if isinstance(msg_content, capnp._DynamicStructReader):
-      msg_dict = msg_content.to_dict()
-    elif isinstance(msg_content, capnp._DynamicListReader):
-      msg_dict = [self.to_json(msg) for msg in msg_content]
-    elif isinstance(msg_content, bytes):
-      msg_dict = msg_content.decode()
-    else:
-      msg_dict = msg_content
+  def should_send(self, service: str, now: float) -> bool:
+    rate_hz = self.service_rates_hz.get(service, self.default_rate_hz)
+    if rate_hz <= 0:
+      return True
 
-    return msg_dict
+    last_send_time = self.last_send_time.get(service, 0.0)
+    return now - last_send_time >= 1.0 / rate_hz
+
+  def buffered_amount(self) -> int:
+    if not self.channels:
+      return 0
+    buffered_amounts = []
+    for channel in self.channels:
+      try:
+        buffered_amounts.append(int(getattr(channel, "bufferedAmount", 0)))
+      except (TypeError, ValueError):
+        buffered_amounts.append(0)
+    return max(buffered_amounts)
 
   def update(self):
     # this is blocking in async context...
     self.sm.update(0)
-    for service, updated in self.sm.updated.items():
-      if not updated:
+    now = time.monotonic()
+    for service in self.services:
+      if self.sm.updated[service]:
+        self.pending_send[service] = True
+      if not self.pending_send[service]:
         continue
-      msg_dict = self.to_json(self.sm[service])
+      if not self.should_send(service, now):
+        continue
+      msg_dict = project_feedback_message(service, self.sm[service])
       mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
       outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
       encoded_msg = json.dumps(outgoing_msg).encode()
+
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        self.skipped[service] += 1
+        continue
+
       for channel in self.channels:
         channel.send(encoded_msg)
+      self.last_send_time[service] = now
+      self.pending_send[service] = False
+      self.sent[service] += 1
+      self.sent_bytes[service] += len(encoded_msg)
+
+  def log_stats(self):
+    sent_counts = " ".join(f"{service}={count}" for service, count in self.sent.items())
+    skipped_counts = " ".join(f"{service}={count}" for service, count in self.skipped.items())
+    sent_kb = " ".join(f"{service}={bytes_sent / 1024.0:.1f}" for service, bytes_sent in self.sent_bytes.items())
+    self.logger.info(
+      "feedback bridge sent %s skipped %s sent_kb %s buffered=%s buffered_max=%s",
+      sent_counts,
+      skipped_counts,
+      sent_kb,
+      self.buffered_amount(),
+      self.max_observed_buffered_amount,
+    )
+    self.max_observed_buffered_amount = self.buffered_amount()
+
+  def maybe_log_stats(self, now: float, last_log: float) -> float:
+    if self.log_stats_enabled and now - last_log >= self.log_interval:
+      self.log_stats()
+      return now
+    return last_log
 
   async def run(self):
     from aiortc.exceptions import InvalidStateError
 
+    last_log = time.monotonic()
     while True:
       if not self._enabled:
         await asyncio.sleep(0.01)
         continue
       try:
         self.update()
+        last_log = self.maybe_log_stats(time.monotonic(), last_log)
       except InvalidStateError:
         self.logger.warning("Cereal outgoing proxy invalid state (connection closed)")
         break
@@ -354,7 +445,13 @@ class StreamSession:
     if len(body.bridge_services_in) > 0:
       self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
     if len(body.bridge_services_out) > 0:
-      self.outgoing_bridge = CerealOutgoingMessageProxy(body.bridge_services_out, self.enabled)
+      webrtc_stats_enabled = os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on")
+      self.outgoing_bridge = CerealOutgoingMessageProxy(
+        body.bridge_services_out,
+        self.enabled,
+        max_buffered_amount=int(os.getenv("TURBO_WEBRTCD_FEEDBACK_MAX_BUFFERED_AMOUNT", str(FEEDBACK_MAX_BUFFERED_AMOUNT))),
+        log_stats=webrtc_stats_enabled,
+      )
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
     if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
       self.stats_logger = WebRTCStatsLogger(
