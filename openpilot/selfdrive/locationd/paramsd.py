@@ -21,13 +21,22 @@ ROLL_STD_MAX = np.radians(1.5)
 LATERAL_ACC_SENSOR_THRESHOLD = 4.0
 OFFSET_MAX = 10.0
 OFFSET_LOWERED_MAX = 8.0
+TURBO_OFFSET_MAX = 20.0
+TURBO_OFFSET_LOWERED_MAX = 16.0
 MIN_ACTIVE_SPEED = 1.0
 LOW_ACTIVE_SPEED = 10.0
+
+
+def get_offset_validity_thresholds(CP: car.CarParams) -> tuple[float, float]:
+  if CP.brand == "turbo":
+    return TURBO_OFFSET_MAX, TURBO_OFFSET_LOWERED_MAX
+  return OFFSET_MAX, OFFSET_LOWERED_MAX
 
 
 class VehicleParamsLearner:
   def __init__(self, CP: car.CarParams, steer_ratio: float, stiffness_factor: float, angle_offset: float, P_initial: np.ndarray | None = None):
     self.kf = CarKalman(GENERATED_DIR)
+    self.offset_max, self.offset_lowered_max = get_offset_validity_thresholds(CP)
 
     self.x_initial = CarKalman.initial_x.copy()
     self.x_initial[States.STEER_RATIO] = steer_ratio
@@ -152,8 +161,8 @@ class VehicleParamsLearner:
       sensors_valid = bool(abs(self.observed_speed * (x[States.YAW_RATE].item() + self.observed_yaw_rate)) < LATERAL_ACC_SENSOR_THRESHOLD)
     else:
       sensors_valid = True
-    self.avg_offset_valid = check_valid_with_hysteresis(self.avg_offset_valid, self.avg_angle_offset, OFFSET_MAX, OFFSET_LOWERED_MAX)
-    self.total_offset_valid = check_valid_with_hysteresis(self.total_offset_valid, self.angle_offset, OFFSET_MAX, OFFSET_LOWERED_MAX)
+    self.avg_offset_valid = check_valid_with_hysteresis(self.avg_offset_valid, self.avg_angle_offset, self.offset_max, self.offset_lowered_max)
+    self.total_offset_valid = check_valid_with_hysteresis(self.total_offset_valid, self.angle_offset, self.offset_max, self.offset_lowered_max)
     self.roll_valid = check_valid_with_hysteresis(self.roll_valid, self.roll, ROLL_MAX, ROLL_LOWERED_MAX)
 
     msg = messaging.new_message('liveParameters')
