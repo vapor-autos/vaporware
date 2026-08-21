@@ -31,6 +31,9 @@ WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
 INF_POINT = np.array([1000.0, 0.0, 0.0])
 MODEL_CROP_ENV = "TURBO_GCS_SHOW_MODEL_CROP"
+MODEL_CROP_LINE_THICKNESS = 3.0
+MODEL_CROP_ROUNDNESS = 0.12
+MODEL_CROP_CORNER_SEGMENTS = 10
 MODEL_CROP_CORNERS = np.array([
   [0.0, 0.0, 1.0],
   [MEDMODEL_INPUT_SIZE[0] - 1.0, 0.0, 1.0],
@@ -250,13 +253,45 @@ class AugmentedRoadView(CameraView):
     if any(point is None for point in screen_points):
       return
 
-    pts = [rl.Vector2(point[0], point[1]) for point in screen_points if point is not None]
-    shadow = rl.Color(0, 0, 0, 220)
+    pts = [np.array(point, dtype=np.float32) for point in screen_points if point is not None]
+    edge_lengths = [float(np.linalg.norm(pts[(i + 1) % len(pts)] - pts[i])) for i in range(len(pts))]
+    if not edge_lengths:
+      return
+
+    radius = min(edge_lengths) * MODEL_CROP_ROUNDNESS * 0.5
+    corner_starts: list[np.ndarray] = []
+    corner_ends: list[np.ndarray] = []
+
+    for i, vertex in enumerate(pts):
+      prev = pts[i - 1]
+      next_pt = pts[(i + 1) % len(pts)]
+      prev_len = float(np.linalg.norm(prev - vertex))
+      next_len = float(np.linalg.norm(next_pt - vertex))
+      if prev_len < 1e-3 or next_len < 1e-3:
+        return
+
+      trim = min(radius, prev_len * 0.45, next_len * 0.45)
+      corner_starts.append(vertex + (prev - vertex) / prev_len * trim)
+      corner_ends.append(vertex + (next_pt - vertex) / next_len * trim)
+
     for i in range(len(pts)):
-      a = pts[i]
-      b = pts[(i + 1) % len(pts)]
-      rl.draw_line_ex(a, b, 5.0, shadow)
-      rl.draw_line_ex(a, b, 3.0, color)
+      start = corner_ends[i]
+      end = corner_starts[(i + 1) % len(pts)]
+      rl.draw_line_ex(rl.Vector2(float(start[0]), float(start[1])),
+                      rl.Vector2(float(end[0]), float(end[1])),
+                      MODEL_CROP_LINE_THICKNESS, color)
+
+      control = pts[(i + 1) % len(pts)]
+      arc_start = corner_starts[(i + 1) % len(pts)]
+      arc_end = corner_ends[(i + 1) % len(pts)]
+      last = arc_start
+      for segment in range(1, MODEL_CROP_CORNER_SEGMENTS + 1):
+        t = segment / MODEL_CROP_CORNER_SEGMENTS
+        point = (1.0 - t) ** 2 * arc_start + 2.0 * (1.0 - t) * t * control + t ** 2 * arc_end
+        rl.draw_line_ex(rl.Vector2(float(last[0]), float(last[1])),
+                        rl.Vector2(float(point[0]), float(point[1])),
+                        MODEL_CROP_LINE_THICKNESS, color)
+        last = point
 
   def _draw_model_crop_overlay(self) -> None:
     if self.frame is None:
