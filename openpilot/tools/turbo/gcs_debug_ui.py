@@ -39,7 +39,7 @@ def main() -> None:
 
   from openpilot.selfdrive.ui.layouts.main import MainLayout
   from openpilot.selfdrive.ui.mici.layouts.main import MiciMainLayout
-  from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
+  from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView, MODEL_CROP_ENV
   from openpilot.selfdrive.ui.ui_state import ui_state
 
   gui_app = ui_application.gui_app
@@ -51,7 +51,11 @@ def main() -> None:
   place_window("UI", monitor)
 
   if gui_app.big_ui():
-    MainLayout(onroad_layout=AugmentedRoadView(stream_type=onroad_stream, auto_switch_stream=False))
+    MainLayout(onroad_layout=AugmentedRoadView(
+      stream_type=onroad_stream,
+      auto_switch_stream=False,
+      show_model_crop=os.getenv(MODEL_CROP_ENV) == "1",
+    ))
   else:
     MiciMainLayout()
 

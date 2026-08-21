@@ -87,6 +87,8 @@ class CameraView(Widget):
     self.frame: VisionBuf | None = None
     self.texture_y: rl.Texture | None = None
     self.texture_uv: rl.Texture | None = None
+    self._last_src_rect: rl.Rectangle | None = None
+    self._last_dst_rect: rl.Rectangle | None = None
 
     # EGL resources
     self.egl_images: dict[int, EGLImage] = {}
@@ -218,12 +220,23 @@ class CameraView(Widget):
     y_offset += transform[1, 2] * rect.height / 2
 
     dst_rect = rl.Rectangle(x_offset, y_offset, scale_x, scale_y)
+    self._last_src_rect = src_rect
+    self._last_dst_rect = dst_rect
 
     # Render with appropriate method
     if TICI:
       self._render_egl(src_rect, dst_rect)
     else:
       self._render_textures(src_rect, dst_rect)
+
+  def camera_point_to_screen(self, x: float, y: float) -> tuple[float, float] | None:
+    if self.frame is None or self._last_dst_rect is None:
+      return None
+
+    return (
+      self._last_dst_rect.x + x / self.frame.width * self._last_dst_rect.width,
+      self._last_dst_rect.y + y / self.frame.height * self._last_dst_rect.height,
+    )
 
   def _draw_placeholder(self, rect: rl.Rectangle):
     if self._placeholder_color:

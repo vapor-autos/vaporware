@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pyray as rl
 from openpilot.cereal import log
@@ -11,6 +12,7 @@ from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
+from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, get_warp_matrix
 from openpilot.common.transformations.orientation import rot_from_euler
 
 OpState = log.SelfdriveState.OpenpilotState
@@ -28,6 +30,16 @@ BORDER_COLORS = {
 WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
 INF_POINT = np.array([1000.0, 0.0, 0.0])
+MODEL_CROP_ENV = "TURBO_GCS_SHOW_MODEL_CROP"
+MODEL_CROP_LINE_THICKNESS = 3.0
+MODEL_CROP_ROUNDNESS = 0.12
+MODEL_CROP_CORNER_SEGMENTS = 10
+MODEL_CROP_CORNERS = np.array([
+  [0.0, 0.0, 1.0],
+  [MEDMODEL_INPUT_SIZE[0] - 1.0, 0.0, 1.0],
+  [MEDMODEL_INPUT_SIZE[0] - 1.0, MEDMODEL_INPUT_SIZE[1] - 1.0, 1.0],
+  [0.0, MEDMODEL_INPUT_SIZE[1] - 1.0, 1.0],
+], dtype=np.float32).T
 
 
 class AugmentedRoadView(CameraView):
@@ -35,12 +47,15 @@ class AugmentedRoadView(CameraView):
     self,
     stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD,
     auto_switch_stream: bool = True,
+    show_model_crop: bool = False,
   ):
     super().__init__("camerad", stream_type)
     self._auto_switch_stream = auto_switch_stream
+    self._show_model_crop = show_model_crop
     self._set_placeholder_color(BORDER_COLORS[UIStatus.DISENGAGED])
 
     self.device_camera: DeviceCameraConfig | None = None
+    self.rpy_calib = np.zeros(3, dtype=np.float32)
     self.view_from_calib = view_frame_from_device_frame.copy()
     self.view_from_wide_calib = view_frame_from_device_frame.copy()
 
@@ -92,6 +107,8 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
+    if self._show_model_crop:
+      self._draw_model_crop_overlay()
 
     # End clipping region
     rl.end_scissor_mode()
@@ -137,12 +154,18 @@ class AugmentedRoadView(CameraView):
     if not self.device_camera and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       self.device_camera = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
 
-    # Check if live calibration data is available and valid
-    if not (sm.updated["liveCalibration"] and sm.valid['liveCalibration']):
+    if not sm.updated["liveCalibration"]:
       return
 
     calib = sm['liveCalibration']
-    if len(calib.rpyCalib) != 3 or calib.calStatus != CALIBRATED:
+    if len(calib.rpyCalib) != 3:
+      return
+
+    # Match modeld's model input warp, which consumes rpyCalib directly.
+    self.rpy_calib = np.array(calib.rpyCalib, dtype=np.float32)
+
+    # Keep the normal UI model renderer stricter about calibration validity.
+    if not sm.valid['liveCalibration'] or calib.calStatus != CALIBRATED:
       return
 
     # Update view_from_calib matrix
@@ -216,10 +239,81 @@ class AugmentedRoadView(CameraView):
 
     return self._cached_matrix
 
+  def _model_crop_source_points(self, intrinsics: np.ndarray, bigmodel_frame: bool) -> list[tuple[float, float]] | None:
+    matrix = get_warp_matrix(self.rpy_calib, intrinsics, bigmodel_frame)
+    points = matrix @ MODEL_CROP_CORNERS
+    if np.any(np.abs(points[2]) < 1e-6):
+      return None
+
+    points = points[:2] / points[2:3]
+    return [(float(x), float(y)) for x, y in points.T]
+
+  def _draw_model_crop_poly(self, points: list[tuple[float, float]], color: rl.Color) -> None:
+    screen_points = [self.camera_point_to_screen(x, y) for x, y in points]
+    if any(point is None for point in screen_points):
+      return
+
+    pts = [np.array(point, dtype=np.float32) for point in screen_points if point is not None]
+    edge_lengths = [float(np.linalg.norm(pts[(i + 1) % len(pts)] - pts[i])) for i in range(len(pts))]
+    if not edge_lengths:
+      return
+
+    radius = min(edge_lengths) * MODEL_CROP_ROUNDNESS * 0.5
+    corner_starts: list[np.ndarray] = []
+    corner_ends: list[np.ndarray] = []
+
+    for i, vertex in enumerate(pts):
+      prev = pts[i - 1]
+      next_pt = pts[(i + 1) % len(pts)]
+      prev_len = float(np.linalg.norm(prev - vertex))
+      next_len = float(np.linalg.norm(next_pt - vertex))
+      if prev_len < 1e-3 or next_len < 1e-3:
+        return
+
+      trim = min(radius, prev_len * 0.45, next_len * 0.45)
+      corner_starts.append(vertex + (prev - vertex) / prev_len * trim)
+      corner_ends.append(vertex + (next_pt - vertex) / next_len * trim)
+
+    for i in range(len(pts)):
+      start = corner_ends[i]
+      end = corner_starts[(i + 1) % len(pts)]
+      rl.draw_line_ex(rl.Vector2(float(start[0]), float(start[1])),
+                      rl.Vector2(float(end[0]), float(end[1])),
+                      MODEL_CROP_LINE_THICKNESS, color)
+
+      control = pts[(i + 1) % len(pts)]
+      arc_start = corner_starts[(i + 1) % len(pts)]
+      arc_end = corner_ends[(i + 1) % len(pts)]
+      last = arc_start
+      for segment in range(1, MODEL_CROP_CORNER_SEGMENTS + 1):
+        t = segment / MODEL_CROP_CORNER_SEGMENTS
+        point = (1.0 - t) ** 2 * arc_start + 2.0 * (1.0 - t) * t * control + t ** 2 * arc_end
+        rl.draw_line_ex(rl.Vector2(float(last[0]), float(last[1])),
+                        rl.Vector2(float(point[0]), float(point[1])),
+                        MODEL_CROP_LINE_THICKNESS, color)
+        last = point
+
+  def _draw_model_crop_overlay(self) -> None:
+    if self.frame is None:
+      return
+
+    device_camera = self.device_camera or DEFAULT_DEVICE_CAMERA
+    crop_color = BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
+    overlays: list[tuple[np.ndarray, bool]] = []
+    if self.stream_type == ROAD_CAM:
+      overlays.append((device_camera.fcam.intrinsics, False))
+    elif self.stream_type == WIDE_CAM:
+      overlays.append((device_camera.ecam.intrinsics, True))
+
+    for intrinsics, bigmodel_frame in overlays:
+      points = self._model_crop_source_points(intrinsics, bigmodel_frame)
+      if points is not None:
+        self._draw_model_crop_poly(points, crop_color)
+
 
 if __name__ == "__main__":
   gui_app.init_window("OnRoad Camera View")
-  road_camera_view = AugmentedRoadView(ROAD_CAM)
+  road_camera_view = AugmentedRoadView(ROAD_CAM, show_model_crop=os.getenv(MODEL_CROP_ENV) == "1")
   gui_app.push_widget(road_camera_view)
   print("***press space to switch camera view***")
   try:
