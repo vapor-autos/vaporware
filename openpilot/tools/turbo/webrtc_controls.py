@@ -35,8 +35,15 @@ UI_FULL_FEEDBACK_SERVICES = UI_MODEL_FEEDBACK_SERVICES + [
   "carControl",
 ]
 
+STEER_ASSIST_FEEDBACK_SERVICES = [
+  "carState",
+  "selfdriveState",
+  "carOutput",
+]
+
 FEEDBACK_SERVICE_PROFILES = {
   "torque": ["carState"],
+  "steer_assist": STEER_ASSIST_FEEDBACK_SERVICES,
   "ui_smoke": UI_SMOKE_FEEDBACK_SERVICES,
   "ui_model": UI_MODEL_FEEDBACK_SERVICES,
   "ui_full": UI_FULL_FEEDBACK_SERVICES,

@@ -42,6 +42,14 @@ def test_expand_feedback_services_accepts_ui_smoke_profile():
   ]
 
 
+def test_expand_feedback_services_accepts_steer_assist_profile():
+  assert expand_feedback_services("", "steer_assist") == [
+    "carState",
+    "selfdriveState",
+    "carOutput",
+  ]
+
+
 def test_expand_feedback_services_combines_and_deduplicates():
   assert expand_feedback_services("carState,modelV2", "torque,ui_smoke") == [
     "carState",

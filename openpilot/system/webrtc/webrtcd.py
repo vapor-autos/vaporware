@@ -86,6 +86,7 @@ class AsyncTaskRunner:
 FEEDBACK_SERVICE_RATES_HZ = {
   "carState": 20.0,
   "selfdriveState": 20.0,
+  "carOutput": 20.0,
   "controlsState": 20.0,
   "modelV2": 2.0,
   "deviceState": 2.0,
@@ -99,8 +100,9 @@ FEEDBACK_LOG_INTERVAL = 5.0
 FEEDBACK_SERVICE_PRIORITIES = {
   "carState": 0,
   "selfdriveState": 1,
-  "controlsState": 2,
-  "onroadEvents": 3,
+  "carOutput": 2,
+  "controlsState": 3,
+  "onroadEvents": 4,
 }
 
 
