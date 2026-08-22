@@ -10,6 +10,8 @@ LOG_INTERVAL_FRAMES = 50
 TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
 TORQUE_SIM_CARSTATE_STALE_S = 0.25
+TORQUE_SIM_ASSIST_STALE_S = 0.25
+STEERING_TARGET_MAX_ANGLE_DEG = 180.0
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -22,6 +24,10 @@ def _accelerator_pedal(accelerator: float) -> float:
 
 def _accelerator_to_simulated_velocity_m_s(accelerator: float, max_velocity_m_s: float) -> float:
   return _accelerator_pedal(accelerator) * max(0.0, max_velocity_m_s)
+
+
+def _steering_angle_to_g29_target(steering_angle_deg: float) -> float:
+  return _clip(-steering_angle_deg / STEERING_TARGET_MAX_ANGLE_DEG, -1.0, 1.0)
 
 
 class SpeedSource:
@@ -40,6 +46,43 @@ class SpeedSource:
       return abs(float(self.sm["carState"].vEgo)), "carState"
 
     return _accelerator_to_simulated_velocity_m_s(state["accelerator"], TORQUE_SIM_MAX_VELOCITY_M_S), "pedal"
+
+
+class AssistTargetSource:
+  def __init__(self, sm: messaging.SubMaster | None = None, stale_timeout_s: float = TORQUE_SIM_ASSIST_STALE_S):
+    self.sm = messaging.SubMaster(["carOutput", "selfdriveState"]) if sm is None else sm
+    self.stale_timeout_s = stale_timeout_s
+    self.last_caroutput_age_s: float | None = None
+    self.last_selfdrive_age_s: float | None = None
+    self.last_target_angle_deg: float | None = None
+
+  def update(self, now: float | None = None) -> tuple[float | None, str]:
+    self.sm.update(0)
+    now = time.monotonic() if now is None else now
+    self.last_caroutput_age_s = self._age("carOutput", now)
+    self.last_selfdrive_age_s = self._age("selfdriveState", now)
+    self.last_target_angle_deg = None
+
+    if not self._fresh("selfdriveState"):
+      return None, "selfdriveState_stale"
+
+    selfdrive_state = self.sm["selfdriveState"]
+    if not (bool(selfdrive_state.enabled) or bool(selfdrive_state.active)):
+      return None, "disengaged"
+
+    if not self._fresh("carOutput"):
+      return None, "carOutput_stale"
+
+    angle_deg = float(self.sm["carOutput"].actuatorsOutput.steeringAngleDeg)
+    self.last_target_angle_deg = angle_deg
+    return _steering_angle_to_g29_target(angle_deg), "carOutput"
+
+  def _age(self, service: str, now: float) -> float | None:
+    return now - self.sm.recv_time[service] if self.sm.seen[service] else None
+
+  def _fresh(self, service: str) -> bool:
+    age = self.last_selfdrive_age_s if service == "selfdriveState" else self.last_caroutput_age_s
+    return self.sm.seen[service] and self.sm.valid[service] and age is not None and age <= self.stale_timeout_s
 
 
 def _dial_delta(events: list[dict]) -> int:
@@ -88,14 +131,17 @@ def _run(sock) -> None:
     g29.set_range(400)
     torque_controller = _make_torque_controller(g29)
     speed_source = SpeedSource()
+    assist_target_source = AssistTargetSource()
     g29.listen()
 
     print(
       " ".join((
         "g29d torque_sim enabled",
         "speed_source=carState",
+        "assist_target=carOutput",
         "pedal_fallback=True",
         f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
+        f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
         f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
         f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
       )),
@@ -109,16 +155,33 @@ def _run(sock) -> None:
       events = g29.get_events()
 
       velocity, speed_source_name = speed_source.update(state)
-      command = torque_controller.update(longitudinal_velocity_m_s=velocity, steering=state["steering"])
+      target_steering, assist_target_name = assist_target_source.update()
+      command = torque_controller.update(
+        longitudinal_velocity_m_s=velocity,
+        steering=state["steering"],
+        target_steering=target_steering,
+      )
       if frame % LOG_INTERVAL_FRAMES == 0:
         carstate_age = speed_source.last_carstate_age_s
         carstate_age_text = "none" if carstate_age is None else f"{carstate_age:.3f}s"
+        caroutput_age = assist_target_source.last_caroutput_age_s
+        caroutput_age_text = "none" if caroutput_age is None else f"{caroutput_age:.3f}s"
+        selfdrive_age = assist_target_source.last_selfdrive_age_s
+        selfdrive_age_text = "none" if selfdrive_age is None else f"{selfdrive_age:.3f}s"
+        target_angle = assist_target_source.last_target_angle_deg
+        target_angle_text = "none" if target_angle is None else f"{target_angle:.2f}deg"
+        target_steering_text = "none" if target_steering is None else f"{target_steering:.3f}"
         print(
           " ".join((
             "g29d torque_sim",
             f"speed_source={speed_source_name}",
+            f"assist_target={assist_target_name}",
             f"velocity={velocity:.2f}m/s",
             f"carstate_age={carstate_age_text}",
+            f"caroutput_age={caroutput_age_text}",
+            f"selfdrive_age={selfdrive_age_text}",
+            f"target_angle={target_angle_text}",
+            f"target_steering={target_steering_text}",
             f"factor={command.speed_factor:.2f}",
             f"force_factor={command.force_factor:.2f}",
             f"target={command.target_position:.3f}",
