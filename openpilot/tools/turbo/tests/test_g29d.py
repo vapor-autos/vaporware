@@ -287,6 +287,7 @@ def test_steer_assist_nudge_publisher_sends_active_nudge_message():
 
   msg = messaging.log_from_bytes(sock.sent[0])
   assert msg.which() == "turboSteerAssist"
+  assert msg.valid
   assert msg.turboSteerAssist.active
   assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(18.0)
   assert msg.turboSteerAssist.wheelSteering == pytest.approx(-0.6)

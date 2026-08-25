@@ -124,6 +124,7 @@ def _publish_state(sock, state: dict, events: list[dict]) -> None:
   button_down = _button_down_events(events)
 
   msg = messaging.new_message("g29")
+  msg.valid = True
   msg.g29.steering = state["steering"]
   msg.g29.accelerator = state["accelerator"]
   msg.g29.reverse = state["clutch"]
@@ -184,6 +185,7 @@ class SteerAssistNudgePublisher:
     ) if active else 0.0
 
     msg = messaging.new_message("turboSteerAssist")
+    msg.valid = True
     msg.turboSteerAssist.active = active
     msg.turboSteerAssist.nudgeAngleDeg = self.last_nudge_angle_deg
     msg.turboSteerAssist.wheelSteering = wheel_steering
