@@ -4,6 +4,7 @@ import pytest
 
 from openpilot.tools.turbo.webrtc_controls import (
   CerealDataChannelReceiver,
+  cereal_message_payload,
   expand_feedback_services,
   model_v2_ui_projection,
   parse_control_services,
@@ -22,12 +23,35 @@ class FakePubMaster:
     self.sent.append((service, msg))
 
 
+class FakeSubMaster:
+  def __init__(self):
+    self.logMonoTime = {"turboSteerAssist": 123}
+    self.valid = {"turboSteerAssist": False}
+    self.data = {
+      "turboSteerAssist": {
+        "active": True,
+        "nudgeAngleDeg": 2.5,
+      },
+    }
+
+  def __getitem__(self, service):
+    return self.data[service]
+
+
 def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
   from openpilot.tools.turbo.webrtc_controls import CerealDataChannelSender
 
   sender = CerealDataChannelSender(["g29"], AiortcChannel())
 
   assert sender.buffered_amount() == 123
+
+
+def test_cereal_message_payload_marks_control_channel_services_valid():
+  payload = json.loads(cereal_message_payload("turboSteerAssist", FakeSubMaster()).decode())
+
+  assert payload["valid"]
+  assert payload["data"]["active"]
+  assert payload["data"]["nudgeAngleDeg"] == pytest.approx(2.5)
 
 
 def test_parse_control_services_adds_derived_steer_assist_for_g29():

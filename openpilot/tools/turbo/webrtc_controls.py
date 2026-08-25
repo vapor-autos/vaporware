@@ -50,6 +50,11 @@ FEEDBACK_SERVICE_PROFILES = {
   "ui_full": UI_FULL_FEEDBACK_SERVICES,
 }
 
+CONTROL_CHANNEL_VALID_SERVICES = {
+  "g29",
+  "turboSteerAssist",
+}
+
 
 def parse_services(services_arg: str) -> list[str]:
   return [service.strip() for service in services_arg.split(",") if service.strip()]
@@ -125,7 +130,7 @@ def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   msg = {
     "type": service,
     "logMonoTime": sm.logMonoTime[service],
-    "valid": sm.valid[service],
+    "valid": service in CONTROL_CHANNEL_VALID_SERVICES or sm.valid[service],
     "data": project_feedback_message(service, sm[service]),
   }
   return json.dumps(msg).encode()
