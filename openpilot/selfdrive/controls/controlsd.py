@@ -21,7 +21,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
-from openpilot.selfdrive.controls.lib.turbo_steer_assist import DEFAULT_MAX_NUDGE_ANGLE_DEG, DEFAULT_STALE_TIMEOUT_S, TurboSteerAssistSource
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import DEFAULT_STALE_TIMEOUT_S, TurboSteerAssistSource, clip_steering_angle_deg
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -63,7 +63,6 @@ class Controls:
     self.turbo_steer_assist_source = TurboSteerAssistSource(
       self.sm,
       stale_timeout_s=float(os.getenv("TURBO_STEER_ASSIST_STALE_TIMEOUT_S", str(DEFAULT_STALE_TIMEOUT_S))),
-      max_nudge_angle_deg=float(os.getenv("TURBO_STEER_ASSIST_MAX_NUDGE_DEG", str(DEFAULT_MAX_NUDGE_ANGLE_DEG))),
     )
     self.turbo_steer_assist_last_log = 0.0
 
@@ -158,7 +157,7 @@ class Controls:
     else:
       model_angle_deg = float(lateral_output)
       assist_nudge_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive)
-      final_angle_deg = model_angle_deg + assist_nudge_deg if self.turbo_steer_assist_apply else model_angle_deg
+      final_angle_deg = clip_steering_angle_deg(model_angle_deg + assist_nudge_deg) if self.turbo_steer_assist_apply else model_angle_deg
       actuators.steeringAngleDeg = final_angle_deg
       self.log_turbo_steer_assist(model_angle_deg, assist_nudge_deg, final_angle_deg, assist_status)
 

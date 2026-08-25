@@ -4,9 +4,8 @@ import time
 
 
 STEERING_TARGET_MAX_ANGLE_DEG = 180.0
-DEFAULT_MAX_NUDGE_ANGLE_DEG = 3.0
-DEFAULT_NUDGE_GAIN_DEG = 30.0
-DEFAULT_NUDGE_DEADBAND_DEG = 0.0
+DEFAULT_INNER_DEADBAND_DEG = 1.0
+DEFAULT_FULL_ASSIST_ERROR_DEG = 3.0
 DEFAULT_STALE_TIMEOUT_S = 0.25
 
 
@@ -18,19 +17,39 @@ def steering_angle_to_g29_target(steering_angle_deg: float) -> float:
   return clip(-steering_angle_deg / STEERING_TARGET_MAX_ANGLE_DEG, -1.0, 1.0)
 
 
+def g29_steering_to_angle_deg(steering: float) -> float:
+  return -clip(steering, -1.0, 1.0) * STEERING_TARGET_MAX_ANGLE_DEG
+
+
+def clip_steering_angle_deg(steering_angle_deg: float) -> float:
+  return clip(steering_angle_deg, -STEERING_TARGET_MAX_ANGLE_DEG, STEERING_TARGET_MAX_ANGLE_DEG)
+
+
+def smoothstep(value: float) -> float:
+  x = clip(value, 0.0, 1.0)
+  return x * x * (3.0 - 2.0 * x)
+
+
 def compute_nudge_angle_deg(
   wheel_steering: float,
-  target_steering: float,
-  gain_deg: float = DEFAULT_NUDGE_GAIN_DEG,
-  max_nudge_angle_deg: float = DEFAULT_MAX_NUDGE_ANGLE_DEG,
-  deadband_deg: float = DEFAULT_NUDGE_DEADBAND_DEG,
+  target_steering_angle_deg: float,
+  inner_deadband_deg: float = DEFAULT_INNER_DEADBAND_DEG,
+  full_assist_error_deg: float = DEFAULT_FULL_ASSIST_ERROR_DEG,
 ) -> float:
-  wheel_delta = clip(wheel_steering, -1.0, 1.0) - clip(target_steering, -1.0, 1.0)
-  nudge_angle_deg = -wheel_delta * max(0.0, gain_deg)
-  if abs(nudge_angle_deg) < max(0.0, deadband_deg):
+  wheel_angle_deg = g29_steering_to_angle_deg(wheel_steering)
+  angle_error_deg = wheel_angle_deg - target_steering_angle_deg
+  abs_error_deg = abs(angle_error_deg)
+  inner = max(0.0, inner_deadband_deg)
+  outer = max(inner, full_assist_error_deg)
+
+  if abs_error_deg <= inner:
     return 0.0
-  max_nudge = max(0.0, max_nudge_angle_deg)
-  return clip(nudge_angle_deg, -max_nudge, max_nudge)
+  if abs_error_deg >= outer:
+    return angle_error_deg
+  if outer == inner:
+    return angle_error_deg
+
+  return angle_error_deg * smoothstep((abs_error_deg - inner) / (outer - inner))
 
 
 class TurboSteerAssistSource:
@@ -38,11 +57,9 @@ class TurboSteerAssistSource:
     self,
     sm,
     stale_timeout_s: float = DEFAULT_STALE_TIMEOUT_S,
-    max_nudge_angle_deg: float = DEFAULT_MAX_NUDGE_ANGLE_DEG,
   ):
     self.sm = sm
     self.stale_timeout_s = stale_timeout_s
-    self.max_nudge_angle_deg = max_nudge_angle_deg
     self.last_age_s: float | None = None
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
@@ -73,8 +90,7 @@ class TurboSteerAssistSource:
       return 0.0, self.last_status
 
     self.last_raw_nudge_angle_deg = float(assist.nudgeAngleDeg)
-    max_nudge = max(0.0, self.max_nudge_angle_deg)
-    self.last_nudge_angle_deg = clip(self.last_raw_nudge_angle_deg, -max_nudge, max_nudge)
+    self.last_nudge_angle_deg = self.last_raw_nudge_angle_deg
     self.last_status = "active"
     return self.last_nudge_angle_deg, self.last_status
 

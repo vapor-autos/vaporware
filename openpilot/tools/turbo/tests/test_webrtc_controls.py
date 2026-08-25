@@ -57,6 +57,7 @@ def test_expand_feedback_services_accepts_steer_assist_profile():
   assert expand_feedback_services("", "steer_assist") == [
     "carState",
     "selfdriveState",
+    "controlsState",
     "carOutput",
   ]
 

@@ -38,6 +38,7 @@ UI_FULL_FEEDBACK_SERVICES = UI_MODEL_FEEDBACK_SERVICES + [
 STEER_ASSIST_FEEDBACK_SERVICES = [
   "carState",
   "selfdriveState",
+  "controlsState",
   "carOutput",
 ]
 

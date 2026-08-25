@@ -18,6 +18,25 @@ class FakeCarOutput:
     self.actuatorsOutput = FakeActuatorsOutput(steering_angle_deg)
 
 
+class FakeAngleState:
+  def __init__(self, steering_angle_desired_deg: float):
+    self.steeringAngleDesiredDeg = steering_angle_desired_deg
+
+
+class FakeLateralControlState:
+  def __init__(self, steering_angle_desired_deg: float, state: str = "angleState"):
+    self.angleState = FakeAngleState(steering_angle_desired_deg)
+    self.state = state
+
+  def which(self):
+    return self.state
+
+
+class FakeControlsState:
+  def __init__(self, steering_angle_desired_deg: float, state: str = "angleState"):
+    self.lateralControlState = FakeLateralControlState(steering_angle_desired_deg, state=state)
+
+
 class FakeSelfdriveState:
   def __init__(self, enabled=False, active=False):
     self.enabled = enabled
@@ -35,6 +54,11 @@ class FakeSubMaster:
     caroutput_valid=None,
     caroutput_recv_time=None,
     steering_angle_deg=0.0,
+    controlsstate_seen=None,
+    controlsstate_valid=None,
+    controlsstate_recv_time=None,
+    steering_angle_desired_deg=0.0,
+    lateral_control_state="angleState",
     selfdrive_seen=None,
     selfdrive_valid=None,
     selfdrive_recv_time=None,
@@ -44,21 +68,25 @@ class FakeSubMaster:
     self.seen = {
       "carState": seen,
       "carOutput": seen if caroutput_seen is None else caroutput_seen,
+      "controlsState": seen if controlsstate_seen is None else controlsstate_seen,
       "selfdriveState": seen if selfdrive_seen is None else selfdrive_seen,
     }
     self.valid = {
       "carState": valid,
       "carOutput": valid if caroutput_valid is None else caroutput_valid,
+      "controlsState": valid if controlsstate_valid is None else controlsstate_valid,
       "selfdriveState": valid if selfdrive_valid is None else selfdrive_valid,
     }
     self.recv_time = {
       "carState": recv_time,
       "carOutput": recv_time if caroutput_recv_time is None else caroutput_recv_time,
+      "controlsState": recv_time if controlsstate_recv_time is None else controlsstate_recv_time,
       "selfdriveState": recv_time if selfdrive_recv_time is None else selfdrive_recv_time,
     }
     self.data = {
       "carState": FakeCarState(v_ego),
       "carOutput": FakeCarOutput(steering_angle_deg),
+      "controlsState": FakeControlsState(steering_angle_desired_deg, state=lateral_control_state),
       "selfdriveState": FakeSelfdriveState(enabled=selfdrive_enabled, active=selfdrive_active),
     }
     self.update_count = 0
@@ -132,12 +160,16 @@ def test_steering_angle_to_g29_target_clips_to_wheel_range():
   assert _steering_angle_to_g29_target(-360.0) == pytest.approx(1.0)
 
 
-def test_assist_target_source_uses_fresh_engaged_caroutput():
+def test_assist_target_source_uses_fresh_engaged_controlsstate_target():
   sm = FakeSubMaster(
     caroutput_seen=True,
     caroutput_valid=True,
     caroutput_recv_time=10.0,
-    steering_angle_deg=45.0,
+    steering_angle_deg=12.0,
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    steering_angle_desired_deg=45.0,
     selfdrive_seen=True,
     selfdrive_valid=True,
     selfdrive_recv_time=10.0,
@@ -148,10 +180,12 @@ def test_assist_target_source_uses_fresh_engaged_caroutput():
   target, name = source.update(now=10.1)
 
   assert target == pytest.approx(-0.25)
-  assert name == "carOutput"
+  assert name == "controlsState"
+  assert source.last_controlsstate_age_s == pytest.approx(0.1)
   assert source.last_caroutput_age_s == pytest.approx(0.1)
   assert source.last_selfdrive_age_s == pytest.approx(0.1)
   assert source.last_target_angle_deg == pytest.approx(45.0)
+  assert source.last_applied_angle_deg == pytest.approx(12.0)
   assert sm.update_count == 1
 
 
@@ -161,6 +195,10 @@ def test_assist_target_source_falls_back_when_disengaged():
     caroutput_valid=True,
     caroutput_recv_time=10.0,
     steering_angle_deg=45.0,
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    steering_angle_desired_deg=45.0,
     selfdrive_seen=True,
     selfdrive_valid=True,
     selfdrive_recv_time=10.0,
@@ -176,12 +214,16 @@ def test_assist_target_source_falls_back_when_disengaged():
   assert source.last_target_angle_deg is None
 
 
-def test_assist_target_source_falls_back_when_caroutput_is_stale():
+def test_assist_target_source_falls_back_when_controlsstate_is_stale():
   sm = FakeSubMaster(
     caroutput_seen=True,
     caroutput_valid=True,
-    caroutput_recv_time=10.0,
+    caroutput_recv_time=10.2,
     steering_angle_deg=45.0,
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    steering_angle_desired_deg=45.0,
     selfdrive_seen=True,
     selfdrive_valid=True,
     selfdrive_recv_time=10.2,
@@ -192,7 +234,26 @@ def test_assist_target_source_falls_back_when_caroutput_is_stale():
   target, name = source.update(now=10.3)
 
   assert target is None
-  assert name == "carOutput_stale"
+  assert name == "controlsState_stale"
+
+
+def test_assist_target_source_falls_back_when_controlsstate_is_not_angle():
+  sm = FakeSubMaster(
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    lateral_control_state="torqueState",
+    selfdrive_seen=True,
+    selfdrive_valid=True,
+    selfdrive_recv_time=10.0,
+    selfdrive_active=True,
+  )
+  source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
+
+  target, name = source.update(now=10.1)
+
+  assert target is None
+  assert name == "controlsState_not_angle"
 
 
 def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
@@ -201,6 +262,10 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
     caroutput_valid=True,
     caroutput_recv_time=10.2,
     steering_angle_deg=45.0,
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.2,
+    steering_angle_desired_deg=45.0,
     selfdrive_seen=True,
     selfdrive_valid=True,
     selfdrive_recv_time=10.0,
@@ -216,14 +281,14 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
 
 def test_steer_assist_nudge_publisher_sends_active_nudge_message():
   sock = FakeSocket()
-  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05, gain_deg=30.0, max_nudge_angle_deg=5.0)
+  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05)
 
   assert publisher.update({"steering": -0.6}, target_steering=-0.5, target_steering_angle_deg=90.0, now=10.0)
 
   msg = messaging.log_from_bytes(sock.sent[0])
   assert msg.which() == "turboSteerAssist"
   assert msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(3.0)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(18.0)
   assert msg.turboSteerAssist.wheelSteering == pytest.approx(-0.6)
   assert msg.turboSteerAssist.targetSteering == pytest.approx(-0.5)
   assert msg.turboSteerAssist.targetSteeringAngleDeg == pytest.approx(90.0)

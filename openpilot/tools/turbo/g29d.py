@@ -3,10 +3,10 @@ import time
 
 import openpilot.cereal.messaging as messaging
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
-  DEFAULT_MAX_NUDGE_ANGLE_DEG,
-  DEFAULT_NUDGE_DEADBAND_DEG,
-  DEFAULT_NUDGE_GAIN_DEG,
+  DEFAULT_FULL_ASSIST_ERROR_DEG,
+  DEFAULT_INNER_DEADBAND_DEG,
   compute_nudge_angle_deg,
+  g29_steering_to_angle_deg,
   steering_angle_to_g29_target,
 )
 
@@ -57,18 +57,22 @@ class SpeedSource:
 
 class AssistTargetSource:
   def __init__(self, sm: messaging.SubMaster | None = None, stale_timeout_s: float = TORQUE_SIM_ASSIST_STALE_S):
-    self.sm = messaging.SubMaster(["carOutput", "selfdriveState"]) if sm is None else sm
+    self.sm = messaging.SubMaster(["controlsState", "selfdriveState", "carOutput"]) if sm is None else sm
     self.stale_timeout_s = stale_timeout_s
+    self.last_controlsstate_age_s: float | None = None
     self.last_caroutput_age_s: float | None = None
     self.last_selfdrive_age_s: float | None = None
     self.last_target_angle_deg: float | None = None
+    self.last_applied_angle_deg: float | None = None
 
   def update(self, now: float | None = None) -> tuple[float | None, str]:
     self.sm.update(0)
     now = time.monotonic() if now is None else now
+    self.last_controlsstate_age_s = self._age("controlsState", now)
     self.last_caroutput_age_s = self._age("carOutput", now)
     self.last_selfdrive_age_s = self._age("selfdriveState", now)
     self.last_target_angle_deg = None
+    self.last_applied_angle_deg = self._applied_angle_deg()
 
     if not self._fresh("selfdriveState"):
       return None, "selfdriveState_stale"
@@ -77,19 +81,34 @@ class AssistTargetSource:
     if not (bool(selfdrive_state.enabled) or bool(selfdrive_state.active)):
       return None, "disengaged"
 
-    if not self._fresh("carOutput"):
-      return None, "carOutput_stale"
+    if not self._fresh("controlsState"):
+      return None, "controlsState_stale"
 
-    angle_deg = float(self.sm["carOutput"].actuatorsOutput.steeringAngleDeg)
+    controls_state = self.sm["controlsState"]
+    lateral_state = controls_state.lateralControlState
+    if lateral_state.which() != "angleState":
+      return None, "controlsState_not_angle"
+
+    angle_deg = float(lateral_state.angleState.steeringAngleDesiredDeg)
     self.last_target_angle_deg = angle_deg
-    return _steering_angle_to_g29_target(angle_deg), "carOutput"
+    return _steering_angle_to_g29_target(angle_deg), "controlsState"
 
   def _age(self, service: str, now: float) -> float | None:
     return now - self.sm.recv_time[service] if self.sm.seen[service] else None
 
   def _fresh(self, service: str) -> bool:
-    age = self.last_selfdrive_age_s if service == "selfdriveState" else self.last_caroutput_age_s
+    ages = {
+      "selfdriveState": self.last_selfdrive_age_s,
+      "controlsState": self.last_controlsstate_age_s,
+      "carOutput": self.last_caroutput_age_s,
+    }
+    age = ages[service]
     return self.sm.seen[service] and self.sm.valid[service] and age is not None and age <= self.stale_timeout_s
+
+  def _applied_angle_deg(self) -> float | None:
+    if not self.sm.seen["carOutput"] or not self.sm.valid["carOutput"]:
+      return None
+    return float(self.sm["carOutput"].actuatorsOutput.steeringAngleDeg)
 
 
 def _dial_delta(events: list[dict]) -> int:
@@ -125,18 +144,18 @@ class SteerAssistNudgePublisher:
     self,
     sock,
     publish_interval_s: float = ASSIST_PUBLISH_INTERVAL,
-    gain_deg: float = DEFAULT_NUDGE_GAIN_DEG,
-    max_nudge_angle_deg: float = DEFAULT_MAX_NUDGE_ANGLE_DEG,
-    deadband_deg: float = DEFAULT_NUDGE_DEADBAND_DEG,
+    inner_deadband_deg: float = DEFAULT_INNER_DEADBAND_DEG,
+    full_assist_error_deg: float = DEFAULT_FULL_ASSIST_ERROR_DEG,
   ):
     self.sock = sock
     self.publish_interval_s = publish_interval_s
-    self.gain_deg = gain_deg
-    self.max_nudge_angle_deg = max_nudge_angle_deg
-    self.deadband_deg = deadband_deg
+    self.inner_deadband_deg = inner_deadband_deg
+    self.full_assist_error_deg = full_assist_error_deg
     self.last_publish_time = 0.0
     self.last_active = False
     self.last_wheel_delta = 0.0
+    self.last_wheel_angle_deg = 0.0
+    self.last_angle_error_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
   def update(
@@ -155,12 +174,13 @@ class SteerAssistNudgePublisher:
     target = 0.0 if target_steering is None else float(target_steering)
     self.last_active = active
     self.last_wheel_delta = wheel_steering - target
+    self.last_wheel_angle_deg = g29_steering_to_angle_deg(wheel_steering)
+    self.last_angle_error_deg = self.last_wheel_angle_deg - float(target_steering_angle_deg) if active else 0.0
     self.last_nudge_angle_deg = compute_nudge_angle_deg(
       wheel_steering,
-      target,
-      gain_deg=self.gain_deg,
-      max_nudge_angle_deg=self.max_nudge_angle_deg,
-      deadband_deg=self.deadband_deg,
+      float(target_steering_angle_deg),
+      inner_deadband_deg=self.inner_deadband_deg,
+      full_assist_error_deg=self.full_assist_error_deg,
     ) if active else 0.0
 
     msg = messaging.new_message("turboSteerAssist")
@@ -200,12 +220,12 @@ def _run(g29_sock, steer_assist_sock) -> None:
       " ".join((
         "g29d torque_sim enabled",
         "speed_source=carState",
-        "assist_target=carOutput",
+        "assist_target=controlsState",
         "pedal_fallback=True",
         f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
         f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
-        f"steer_assist_nudge_max={DEFAULT_MAX_NUDGE_ANGLE_DEG:.1f}deg",
-        f"steer_assist_gain={DEFAULT_NUDGE_GAIN_DEG:.1f}deg",
+        f"steer_assist_inner_deadband={DEFAULT_INNER_DEADBAND_DEG:.1f}deg",
+        f"steer_assist_full_error={DEFAULT_FULL_ASSIST_ERROR_DEG:.1f}deg",
         f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
         f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
       )),
@@ -229,6 +249,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
       if frame % LOG_INTERVAL_FRAMES == 0:
         carstate_age = speed_source.last_carstate_age_s
         carstate_age_text = "none" if carstate_age is None else f"{carstate_age:.3f}s"
+        controlsstate_age = assist_target_source.last_controlsstate_age_s
+        controlsstate_age_text = "none" if controlsstate_age is None else f"{controlsstate_age:.3f}s"
         caroutput_age = assist_target_source.last_caroutput_age_s
         caroutput_age_text = "none" if caroutput_age is None else f"{caroutput_age:.3f}s"
         selfdrive_age = assist_target_source.last_selfdrive_age_s
@@ -236,6 +258,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
         target_angle = assist_target_source.last_target_angle_deg
         target_angle_text = "none" if target_angle is None else f"{target_angle:.2f}deg"
         target_steering_text = "none" if target_steering is None else f"{target_steering:.3f}"
+        applied_angle = assist_target_source.last_applied_angle_deg
+        applied_angle_text = "none" if applied_angle is None else f"{applied_angle:.2f}deg"
         print(
           " ".join((
             "g29d torque_sim",
@@ -243,10 +267,14 @@ def _run(g29_sock, steer_assist_sock) -> None:
             f"assist_target={assist_target_name}",
             f"velocity={velocity:.2f}m/s",
             f"carstate_age={carstate_age_text}",
+            f"controlsstate_age={controlsstate_age_text}",
             f"caroutput_age={caroutput_age_text}",
             f"selfdrive_age={selfdrive_age_text}",
             f"target_angle={target_angle_text}",
+            f"applied_angle={applied_angle_text}",
             f"target_steering={target_steering_text}",
+            f"wheel_angle={steer_assist_publisher.last_wheel_angle_deg:.2f}deg",
+            f"angle_error={steer_assist_publisher.last_angle_error_deg:.2f}deg",
             f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
             f"factor={command.speed_factor:.2f}",
             f"force_factor={command.force_factor:.2f}",

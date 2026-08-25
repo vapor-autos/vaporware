@@ -3,6 +3,7 @@ import pytest
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
   TurboSteerAssistSource,
   compute_nudge_angle_deg,
+  g29_steering_to_angle_deg,
   steering_angle_to_g29_target,
 )
 
@@ -29,19 +30,21 @@ def test_steering_angle_to_g29_target_uses_teleop_sign():
   assert steering_angle_to_g29_target(-90.0) == pytest.approx(0.5)
 
 
-def test_compute_nudge_angle_deg_uses_wheel_delta_from_target():
-  assert compute_nudge_angle_deg(wheel_steering=-0.6, target_steering=-0.5, gain_deg=30.0, max_nudge_angle_deg=5.0) == pytest.approx(3.0)
-  assert compute_nudge_angle_deg(wheel_steering=-0.4, target_steering=-0.5, gain_deg=30.0, max_nudge_angle_deg=5.0) == pytest.approx(-3.0)
+def test_g29_steering_to_angle_deg_uses_teleop_sign():
+  assert g29_steering_to_angle_deg(-0.5) == pytest.approx(90.0)
+  assert g29_steering_to_angle_deg(0.5) == pytest.approx(-90.0)
 
 
-def test_compute_nudge_angle_deg_clips_and_deadbands():
-  assert compute_nudge_angle_deg(-1.0, 0.0, gain_deg=30.0, max_nudge_angle_deg=3.0) == pytest.approx(3.0)
-  assert compute_nudge_angle_deg(-0.51, -0.5, gain_deg=30.0, max_nudge_angle_deg=3.0, deadband_deg=0.5) == pytest.approx(0.0)
+def test_compute_nudge_angle_deg_uses_soft_deadband():
+  assert compute_nudge_angle_deg(wheel_steering=-91.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.0)
+  assert compute_nudge_angle_deg(wheel_steering=-92.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(1.0)
+  assert compute_nudge_angle_deg(wheel_steering=-95.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(5.0)
+  assert compute_nudge_angle_deg(wheel_steering=-85.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(-5.0)
 
 
 def test_turbo_steer_assist_source_uses_fresh_active_nudge():
   sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=2.0)
-  source = TurboSteerAssistSource(sm, stale_timeout_s=0.25, max_nudge_angle_deg=3.0)
+  source = TurboSteerAssistSource(sm, stale_timeout_s=0.25)
 
   nudge, status = source.update(lat_active=True, now=10.1)
 
@@ -50,13 +53,13 @@ def test_turbo_steer_assist_source_uses_fresh_active_nudge():
   assert source.last_age_s == pytest.approx(0.1)
 
 
-def test_turbo_steer_assist_source_clips_received_nudge():
+def test_turbo_steer_assist_source_does_not_apply_small_nudge_cap():
   sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=8.0)
-  source = TurboSteerAssistSource(sm, stale_timeout_s=0.25, max_nudge_angle_deg=3.0)
+  source = TurboSteerAssistSource(sm, stale_timeout_s=0.25)
 
   nudge, status = source.update(lat_active=True, now=10.1)
 
-  assert nudge == pytest.approx(3.0)
+  assert nudge == pytest.approx(8.0)
   assert status == "active"
   assert source.last_raw_nudge_angle_deg == pytest.approx(8.0)
 
