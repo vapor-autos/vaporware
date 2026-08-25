@@ -243,7 +243,12 @@ class CerealIncomingMessageProxy:
     if not isinstance(msg_data, dict):
       size = len(msg_data)
 
-    msg = messaging.new_message(msg_type, size=size)
+    msg = messaging.new_message(
+      msg_type,
+      size=size,
+      valid=bool(msg_json.get("valid", False)),
+      logMonoTime=int(msg_json.get("logMonoTime", time.monotonic() * 1e9)),
+    )
     setattr(msg, msg_type, msg_data)
     self.pm.send(msg_type, msg)
 

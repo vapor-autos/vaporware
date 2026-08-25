@@ -175,6 +175,28 @@ class TestStreamSession:
 
       mocked_pubmaster.reset_mock()
 
+  def test_incoming_proxy_preserves_message_metadata(self, mocker):
+    mocked_pubmaster = mocker.MagicMock(spec=messaging.PubMaster)
+    proxy = CerealIncomingMessageProxy(mocked_pubmaster)
+    msg = {
+      "type": "turboSteerAssist",
+      "logMonoTime": 123,
+      "valid": True,
+      "data": {
+        "active": True,
+        "nudgeAngleDeg": 2.5,
+      },
+    }
+
+    proxy.send(json.dumps(msg).encode())
+
+    service, forwarded = mocked_pubmaster.send.call_args.args
+    assert service == "turboSteerAssist"
+    assert forwarded.valid
+    assert forwarded.logMonoTime == 123
+    assert forwarded.turboSteerAssist.active
+    assert forwarded.turboSteerAssist.nudgeAngleDeg == 2.5
+
   def test_livestream_track(self, mocker):
     fake_msg = messaging.new_message("livestreamDriverEncodeData")
 
