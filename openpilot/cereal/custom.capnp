@@ -19,7 +19,12 @@ struct CustomReserved1 @0xaedffd8f31e7b55d {
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct TurboSteerAssist @0xda96579883444c35 {
+  active @0 :Bool;
+  nudgeAngleDeg @1 :Float32;
+  wheelSteering @2 :Float32;
+  targetSteeringAngleDeg @3 :Float32;
+  targetSteering @4 :Float32;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {

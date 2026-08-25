@@ -2,16 +2,23 @@
 import time
 
 import openpilot.cereal.messaging as messaging
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
+  DEFAULT_MAX_NUDGE_ANGLE_DEG,
+  DEFAULT_NUDGE_DEADBAND_DEG,
+  DEFAULT_NUDGE_GAIN_DEG,
+  compute_nudge_angle_deg,
+  steering_angle_to_g29_target,
+)
 
 RETRY_DELAY = 2.0
 PUBLISH_INTERVAL = 0.02
+ASSIST_PUBLISH_INTERVAL = 0.05
 LOG_INTERVAL_FRAMES = 50
 
 TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
 TORQUE_SIM_CARSTATE_STALE_S = 0.25
 TORQUE_SIM_ASSIST_STALE_S = 0.25
-STEERING_TARGET_MAX_ANGLE_DEG = 180.0
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -27,7 +34,7 @@ def _accelerator_to_simulated_velocity_m_s(accelerator: float, max_velocity_m_s:
 
 
 def _steering_angle_to_g29_target(steering_angle_deg: float) -> float:
-  return _clip(-steering_angle_deg / STEERING_TARGET_MAX_ANGLE_DEG, -1.0, 1.0)
+  return steering_angle_to_g29_target(steering_angle_deg)
 
 
 class SpeedSource:
@@ -113,6 +120,60 @@ def _publish_state(sock, state: dict, events: list[dict]) -> None:
   sock.send(msg.to_bytes())
 
 
+class SteerAssistNudgePublisher:
+  def __init__(
+    self,
+    sock,
+    publish_interval_s: float = ASSIST_PUBLISH_INTERVAL,
+    gain_deg: float = DEFAULT_NUDGE_GAIN_DEG,
+    max_nudge_angle_deg: float = DEFAULT_MAX_NUDGE_ANGLE_DEG,
+    deadband_deg: float = DEFAULT_NUDGE_DEADBAND_DEG,
+  ):
+    self.sock = sock
+    self.publish_interval_s = publish_interval_s
+    self.gain_deg = gain_deg
+    self.max_nudge_angle_deg = max_nudge_angle_deg
+    self.deadband_deg = deadband_deg
+    self.last_publish_time = 0.0
+    self.last_active = False
+    self.last_wheel_delta = 0.0
+    self.last_nudge_angle_deg = 0.0
+
+  def update(
+    self,
+    state: dict,
+    target_steering: float | None,
+    target_steering_angle_deg: float | None,
+    now: float | None = None,
+  ) -> bool:
+    now = time.monotonic() if now is None else now
+    if now - self.last_publish_time < self.publish_interval_s:
+      return False
+
+    wheel_steering = float(state["steering"])
+    active = target_steering is not None and target_steering_angle_deg is not None
+    target = 0.0 if target_steering is None else float(target_steering)
+    self.last_active = active
+    self.last_wheel_delta = wheel_steering - target
+    self.last_nudge_angle_deg = compute_nudge_angle_deg(
+      wheel_steering,
+      target,
+      gain_deg=self.gain_deg,
+      max_nudge_angle_deg=self.max_nudge_angle_deg,
+      deadband_deg=self.deadband_deg,
+    ) if active else 0.0
+
+    msg = messaging.new_message("turboSteerAssist")
+    msg.turboSteerAssist.active = active
+    msg.turboSteerAssist.nudgeAngleDeg = self.last_nudge_angle_deg
+    msg.turboSteerAssist.wheelSteering = wheel_steering
+    msg.turboSteerAssist.targetSteering = target
+    msg.turboSteerAssist.targetSteeringAngleDeg = 0.0 if target_steering_angle_deg is None else float(target_steering_angle_deg)
+    self.sock.send(msg.to_bytes())
+    self.last_publish_time = now
+    return True
+
+
 def _make_torque_controller(g29):
   from g29py.advanced import SteeringTorqueConfig, SteeringTorqueController
 
@@ -122,7 +183,7 @@ def _make_torque_controller(g29):
   return SteeringTorqueController(g29, config=config)
 
 
-def _run(sock) -> None:
+def _run(g29_sock, steer_assist_sock) -> None:
   from g29py import G29
 
   g29 = None
@@ -132,6 +193,7 @@ def _run(sock) -> None:
     torque_controller = _make_torque_controller(g29)
     speed_source = SpeedSource()
     assist_target_source = AssistTargetSource()
+    steer_assist_publisher = SteerAssistNudgePublisher(steer_assist_sock)
     g29.listen()
 
     print(
@@ -142,6 +204,8 @@ def _run(sock) -> None:
         "pedal_fallback=True",
         f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
         f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
+        f"steer_assist_nudge_max={DEFAULT_MAX_NUDGE_ANGLE_DEG:.1f}deg",
+        f"steer_assist_gain={DEFAULT_NUDGE_GAIN_DEG:.1f}deg",
         f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
         f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
       )),
@@ -156,6 +220,7 @@ def _run(sock) -> None:
 
       velocity, speed_source_name = speed_source.update(state)
       target_steering, assist_target_name = assist_target_source.update()
+      steer_assist_publisher.update(state, target_steering, assist_target_source.last_target_angle_deg)
       command = torque_controller.update(
         longitudinal_velocity_m_s=velocity,
         steering=state["steering"],
@@ -182,6 +247,7 @@ def _run(sock) -> None:
             f"selfdrive_age={selfdrive_age_text}",
             f"target_angle={target_angle_text}",
             f"target_steering={target_steering_text}",
+            f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
             f"factor={command.speed_factor:.2f}",
             f"force_factor={command.force_factor:.2f}",
             f"target={command.target_position:.3f}",
@@ -191,7 +257,7 @@ def _run(sock) -> None:
           flush=True,
         )
 
-      _publish_state(sock, state, events)
+      _publish_state(g29_sock, state, events)
       frame += 1
   finally:
     if g29 is not None:
@@ -200,11 +266,12 @@ def _run(sock) -> None:
 
 
 def main() -> None:
-  sock = messaging.pub_sock("g29")
+  g29_sock = messaging.pub_sock("g29")
+  steer_assist_sock = messaging.pub_sock("turboSteerAssist")
 
   while True:
     try:
-      _run(sock)
+      _run(g29_sock, steer_assist_sock)
     except KeyboardInterrupt:
       raise
     except Exception as e:

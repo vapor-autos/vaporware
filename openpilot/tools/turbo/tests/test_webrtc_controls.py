@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, expand_feedback_services, model_v2_ui_projection
+from openpilot.tools.turbo.webrtc_controls import (
+  CerealDataChannelReceiver,
+  expand_feedback_services,
+  model_v2_ui_projection,
+  parse_control_services,
+)
 
 
 class AiortcChannel:
@@ -23,6 +28,12 @@ def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
   sender = CerealDataChannelSender(["g29"], AiortcChannel())
 
   assert sender.buffered_amount() == 123
+
+
+def test_parse_control_services_adds_derived_steer_assist_for_g29():
+  assert parse_control_services("g29") == ["g29", "turboSteerAssist"]
+  assert parse_control_services("g29,turboSteerAssist") == ["g29", "turboSteerAssist"]
+  assert parse_control_services("testJoystick") == ["testJoystick"]
 
 
 def test_expand_feedback_services_accepts_explicit_services():
@@ -120,6 +131,32 @@ def test_cereal_data_channel_receiver_publishes_allowlisted_car_state():
   assert msg.carState.vEgoRaw == 4.5
   assert not msg.carState.standstill
   assert receiver.received["carState"] == 1
+
+
+def test_cereal_data_channel_receiver_publishes_turbo_steer_assist():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["turboSteerAssist"], pm=pm)
+  payload = {
+    "type": "turboSteerAssist",
+    "logMonoTime": 123,
+    "valid": True,
+    "data": {
+      "active": True,
+      "nudgeAngleDeg": 2.5,
+      "wheelSteering": -0.6,
+      "targetSteeringAngleDeg": 90.0,
+      "targetSteering": -0.5,
+    },
+  }
+
+  assert receiver.receive(json.dumps(payload).encode())
+
+  service, msg = pm.sent[0]
+  assert service == "turboSteerAssist"
+  assert msg.valid
+  assert msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(2.5)
+  assert msg.turboSteerAssist.targetSteering == pytest.approx(-0.5)
 
 
 def test_cereal_data_channel_receiver_ignores_non_allowlisted_service():

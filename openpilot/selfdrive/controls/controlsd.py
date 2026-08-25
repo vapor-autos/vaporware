@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 from numbers import Number
+import os
+import time
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -19,6 +21,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import DEFAULT_MAX_NUDGE_ANGLE_DEG, DEFAULT_STALE_TIMEOUT_S, TurboSteerAssistSource
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -28,6 +31,14 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 TURBO_MAX_CURVATURE = 0.45
+TURBO_STEER_ASSIST_LOG_INTERVAL_S = 1.0
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 class Controls:
@@ -41,13 +52,20 @@ class Controls:
 
     self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
                                    'liveCalibration', 'livePose', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'turboSteerAssist'], poll='selfdriveState')
     self.pm = messaging.PubMaster(['carControl', 'controlsState'])
 
     self.steer_limited_by_safety = False
     self.curvature = 0.0
     self.desired_curvature = 0.0
     self.max_curvature = TURBO_MAX_CURVATURE if self.CP.brand == "turbo" else MAX_CURVATURE
+    self.turbo_steer_assist_apply = self.CP.brand == "turbo" and env_bool("TURBO_STEER_ASSIST_APPLY")
+    self.turbo_steer_assist_source = TurboSteerAssistSource(
+      self.sm,
+      stale_timeout_s=float(os.getenv("TURBO_STEER_ASSIST_STALE_TIMEOUT_S", str(DEFAULT_STALE_TIMEOUT_S))),
+      max_nudge_angle_deg=float(os.getenv("TURBO_STEER_ASSIST_MAX_NUDGE_DEG", str(DEFAULT_MAX_NUDGE_ANGLE_DEG))),
+    )
+    self.turbo_steer_assist_last_log = 0.0
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -138,7 +156,12 @@ class Controls:
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:
-      actuators.steeringAngleDeg = float(lateral_output)
+      model_angle_deg = float(lateral_output)
+      assist_nudge_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive)
+      final_angle_deg = model_angle_deg + assist_nudge_deg if self.turbo_steer_assist_apply else model_angle_deg
+      actuators.steeringAngleDeg = final_angle_deg
+      self.log_turbo_steer_assist(model_angle_deg, assist_nudge_deg, final_angle_deg, assist_status)
+
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
       attr = getattr(actuators, p)
@@ -150,6 +173,25 @@ class Controls:
         setattr(actuators, p, 0.0)
 
     return CC, lac_log
+
+  def log_turbo_steer_assist(self, model_angle_deg: float, nudge_angle_deg: float, final_angle_deg: float, status: str) -> None:
+    if self.CP.brand != "turbo":
+      return
+    now = time.monotonic()
+    if now - self.turbo_steer_assist_last_log < TURBO_STEER_ASSIST_LOG_INTERVAL_S:
+      return
+    age = self.turbo_steer_assist_source.last_age_s
+    age_text = "none" if age is None else f"{age:.3f}s"
+    cloudlog.info(
+      "turbo steer assist apply=%s status=%s age=%s model_angle=%.2fdeg nudge=%.2fdeg final_angle=%.2fdeg",
+      self.turbo_steer_assist_apply,
+      status,
+      age_text,
+      model_angle_deg,
+      nudge_angle_deg,
+      final_angle_deg,
+    )
+    self.turbo_steer_assist_last_log = now
 
   def publish(self, CC, lac_log):
     CS = self.sm['carState']

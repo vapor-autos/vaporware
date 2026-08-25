@@ -55,7 +55,10 @@ def parse_services(services_arg: str) -> list[str]:
 
 
 def parse_control_services(services_arg: str) -> list[str]:
-  return parse_services(services_arg)
+  services = parse_services(services_arg)
+  if "g29" in services and "turboSteerAssist" not in services:
+    services.append("turboSteerAssist")
+  return services
 
 
 def expand_feedback_services(services_arg: str, profile_arg: str = "") -> list[str]:

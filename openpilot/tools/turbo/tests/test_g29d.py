@@ -1,4 +1,5 @@
-from openpilot.tools.turbo.g29d import AssistTargetSource, SpeedSource, _steering_angle_to_g29_target
+from openpilot.cereal import messaging
+from openpilot.tools.turbo.g29d import AssistTargetSource, SpeedSource, SteerAssistNudgePublisher, _steering_angle_to_g29_target
 import pytest
 
 
@@ -68,6 +69,14 @@ class FakeSubMaster:
 
   def __getitem__(self, service):
     return self.data[service]
+
+
+class FakeSocket:
+  def __init__(self):
+    self.sent = []
+
+  def send(self, data: bytes):
+    self.sent.append(data)
 
 
 def test_speed_source_uses_fresh_carstate_speed():
@@ -203,3 +212,32 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
 
   assert target is None
   assert name == "selfdriveState_stale"
+
+
+def test_steer_assist_nudge_publisher_sends_active_nudge_message():
+  sock = FakeSocket()
+  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05, gain_deg=30.0, max_nudge_angle_deg=5.0)
+
+  assert publisher.update({"steering": -0.6}, target_steering=-0.5, target_steering_angle_deg=90.0, now=10.0)
+
+  msg = messaging.log_from_bytes(sock.sent[0])
+  assert msg.which() == "turboSteerAssist"
+  assert msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(3.0)
+  assert msg.turboSteerAssist.wheelSteering == pytest.approx(-0.6)
+  assert msg.turboSteerAssist.targetSteering == pytest.approx(-0.5)
+  assert msg.turboSteerAssist.targetSteeringAngleDeg == pytest.approx(90.0)
+
+
+def test_steer_assist_nudge_publisher_rate_limits_and_sends_inactive():
+  sock = FakeSocket()
+  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05)
+
+  assert publisher.update({"steering": -0.6}, target_steering=-0.5, target_steering_angle_deg=90.0, now=10.0)
+  assert not publisher.update({"steering": -0.6}, target_steering=-0.5, target_steering_angle_deg=90.0, now=10.02)
+  assert publisher.update({"steering": -0.6}, target_steering=None, target_steering_angle_deg=None, now=10.06)
+
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert msg.which() == "turboSteerAssist"
+  assert not msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
