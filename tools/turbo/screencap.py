@@ -58,6 +58,46 @@ def ffmpeg_bin() -> str:
   return "ffmpeg"
 
 
+def ffprobe_bin(ffmpeg: str) -> str:
+  if os.environ.get("FFPROBE"):
+    return os.environ["FFPROBE"]
+
+  ffmpeg_path = Path(ffmpeg)
+  if ffmpeg_path.parent != Path("."):
+    sibling = ffmpeg_path.with_name("ffprobe")
+    if sibling.exists():
+      return str(sibling)
+  if Path("/usr/bin/ffprobe").exists():
+    return "/usr/bin/ffprobe"
+  return "ffprobe"
+
+
+def valid_capture(path: Path, ffmpeg: str) -> bool:
+  try:
+    proc = subprocess.run(
+      [
+        ffprobe_bin(ffmpeg),
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+      ],
+      text=True,
+      capture_output=True,
+      check=False,
+    )
+  except OSError as e:
+    print(f"could not validate capture with ffprobe: {e}", file=sys.stderr)
+    return False
+  if proc.returncode == 0 and proc.stdout.strip():
+    return True
+
+  if proc.stderr.strip():
+    print(proc.stderr.strip(), file=sys.stderr)
+  return False
+
+
 def capture_paths() -> tuple[Path, Path]:
   CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
   timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -80,8 +120,11 @@ def main() -> int:
 
   size = args.size or display_size(args.display)
   final_path, tmp_path = capture_paths()
+  ffmpeg = ffmpeg_bin()
+  # Do not use +faststart here. Its in-place second pass can corrupt mdat if
+  # finalization is interrupted, and local captures do not need it.
   cmd = [
-    ffmpeg_bin(),
+    ffmpeg,
     "-hide_banner",
     "-loglevel", "warning",
     "-y",
@@ -94,27 +137,37 @@ def main() -> int:
     "-preset", DEFAULT_PRESET,
     "-crf", str(DEFAULT_CRF),
     "-pix_fmt", "yuv420p",
-    "-movflags", "+faststart",
   ]
   if args.duration is not None:
     cmd += ["-t", str(args.duration)]
   cmd.append(str(tmp_path))
 
   print(f"recording {args.display} {size} @ {args.fps}fps -> {final_path}")
-  proc = subprocess.Popen(cmd)
+  # Keep ffmpeg out of the terminal's foreground process group. Otherwise one
+  # Ctrl-C signals both processes and this handler sends ffmpeg a second SIGINT
+  # while it is flushing the encoder or writing the MP4 index.
+  proc = subprocess.Popen(cmd, start_new_session=True)
+  interrupted = False
   try:
     proc.wait()
   except KeyboardInterrupt:
+    interrupted = True
+    print("\nstopping recording; waiting for ffmpeg to finalize the MP4...", file=sys.stderr)
     proc.send_signal(signal.SIGINT)
-    proc.wait()
+    while proc.poll() is None:
+      try:
+        proc.wait()
+      except KeyboardInterrupt:
+        print("\nalready finalizing; please wait...", file=sys.stderr)
 
-  if proc.returncode in (0, 255) and tmp_path.exists() and tmp_path.stat().st_size > 0:
+  expected_exit = proc.returncode == 0 or (interrupted and proc.returncode == 255)
+  if expected_exit and tmp_path.exists() and tmp_path.stat().st_size > 0 and valid_capture(tmp_path, ffmpeg):
     tmp_path.replace(final_path)
     print(final_path)
     return 0
 
   if tmp_path.exists():
-    tmp_path.unlink()
+    print(f"capture was not finalized; preserving recovery file: {tmp_path}", file=sys.stderr)
   return proc.returncode or 1
 
 
