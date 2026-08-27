@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from collections import deque
 import time
 
 import openpilot.cereal.messaging as messaging
@@ -19,6 +20,10 @@ TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
 TORQUE_SIM_CARSTATE_STALE_S = 0.25
 TORQUE_SIM_ASSIST_STALE_S = 0.25
+STEER_ASSIST_RESPONSE_DELAY_S = 0.12
+STEER_ASSIST_ENGAGE_WARMUP_S = 0.5
+STEER_ASSIST_HAPTIC_FORCE = 0.4
+STEER_ASSIST_HAPTIC_FRICTION = 0.25
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -35,6 +40,56 @@ def _accelerator_to_simulated_velocity_m_s(accelerator: float, max_velocity_m_s:
 
 def _steering_angle_to_g29_target(steering_angle_deg: float) -> float:
   return steering_angle_to_g29_target(steering_angle_deg)
+
+
+def _effect_position_to_steering_angle_deg(effect_position: float) -> float:
+  quantized_position = round(_clip(effect_position, 0.0, 1.0) * 255.0) / 255.0
+  return g29_steering_to_angle_deg(quantized_position * 2.0 - 1.0)
+
+
+class PassiveWheelObserver:
+  def __init__(self, response_delay_s: float = STEER_ASSIST_RESPONSE_DELAY_S):
+    self.response_delay_s = max(0.0, response_delay_s)
+    self.target_history: deque[tuple[float, float]] = deque()
+    self.last_expected_angle_deg: float | None = None
+    self.ready = False
+
+  def update(self, haptic_target_angle_deg: float, now: float | None = None) -> float | None:
+    now = time.monotonic() if now is None else now
+    target_angle_deg = float(haptic_target_angle_deg)
+    if self.target_history and now < self.target_history[-1][0]:
+      self.reset()
+
+    if self.target_history and now == self.target_history[-1][0]:
+      self.target_history[-1] = (now, target_angle_deg)
+    else:
+      self.target_history.append((now, target_angle_deg))
+
+    observation_time = now - self.response_delay_s
+    if observation_time < self.target_history[0][0]:
+      self.ready = False
+      self.last_expected_angle_deg = None
+      return None
+
+    while len(self.target_history) > 2 and self.target_history[1][0] <= observation_time:
+      self.target_history.popleft()
+
+    before_time, before_angle = self.target_history[0]
+    expected_angle_deg = before_angle
+    if len(self.target_history) > 1:
+      after_time, after_angle = self.target_history[1]
+      if after_time > before_time:
+        factor = _clip((observation_time - before_time) / (after_time - before_time), 0.0, 1.0)
+        expected_angle_deg = before_angle + (after_angle - before_angle) * factor
+
+    self.ready = True
+    self.last_expected_angle_deg = expected_angle_deg
+    return expected_angle_deg
+
+  def reset(self) -> None:
+    self.target_history.clear()
+    self.last_expected_angle_deg = None
+    self.ready = False
 
 
 class SpeedSource:
@@ -147,16 +202,24 @@ class SteerAssistNudgePublisher:
     publish_interval_s: float = ASSIST_PUBLISH_INTERVAL,
     inner_deadband_deg: float = DEFAULT_INNER_DEADBAND_DEG,
     full_assist_error_deg: float = DEFAULT_FULL_ASSIST_ERROR_DEG,
+    response_delay_s: float = STEER_ASSIST_RESPONSE_DELAY_S,
+    engage_warmup_s: float = STEER_ASSIST_ENGAGE_WARMUP_S,
   ):
     self.sock = sock
     self.publish_interval_s = publish_interval_s
     self.inner_deadband_deg = inner_deadband_deg
     self.full_assist_error_deg = full_assist_error_deg
+    self.engage_warmup_s = max(0.0, engage_warmup_s)
+    self.observer = PassiveWheelObserver(response_delay_s=response_delay_s)
     self.last_publish_time = 0.0
     self.last_active = False
+    self.active_since: float | None = None
+    self.last_observer_status = "warming_history"
     self.last_wheel_delta = 0.0
     self.last_wheel_angle_deg = 0.0
     self.last_angle_error_deg = 0.0
+    self.last_expected_wheel_angle_deg: float | None = None
+    self.last_residual_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
   def update(
@@ -164,25 +227,50 @@ class SteerAssistNudgePublisher:
     state: dict,
     target_steering: float | None,
     target_steering_angle_deg: float | None,
+    haptic_target_angle_deg: float,
     now: float | None = None,
   ) -> bool:
     now = time.monotonic() if now is None else now
-    if now - self.last_publish_time < self.publish_interval_s:
-      return False
-
     wheel_steering = float(state["steering"])
-    active = target_steering is not None and target_steering_angle_deg is not None
+    requested_active = target_steering is not None and target_steering_angle_deg is not None
     target = 0.0 if target_steering is None else float(target_steering)
-    self.last_active = active
     self.last_wheel_delta = wheel_steering - target
     self.last_wheel_angle_deg = g29_steering_to_angle_deg(wheel_steering)
-    self.last_angle_error_deg = self.last_wheel_angle_deg - float(target_steering_angle_deg) if active else 0.0
-    self.last_nudge_angle_deg = compute_nudge_angle_deg(
-      wheel_steering,
-      float(target_steering_angle_deg),
-      inner_deadband_deg=self.inner_deadband_deg,
-      full_assist_error_deg=self.full_assist_error_deg,
-    ) if active else 0.0
+    self.last_angle_error_deg = self.last_wheel_angle_deg - float(target_steering_angle_deg) if requested_active else 0.0
+    self.last_expected_wheel_angle_deg = self.observer.update(haptic_target_angle_deg, now=now)
+
+    if not requested_active:
+      self.active_since = None
+      self.last_observer_status = "disengaged"
+    else:
+      if self.active_since is None:
+        self.active_since = now
+      if not self.observer.ready:
+        self.last_observer_status = "warming_history"
+      elif now - self.active_since < self.engage_warmup_s:
+        self.last_observer_status = "engage_warmup"
+      else:
+        self.last_observer_status = "ready"
+
+    active = requested_active and self.last_observer_status == "ready" and self.last_expected_wheel_angle_deg is not None
+    self.last_active = active
+    self.last_residual_angle_deg = (
+      self.last_wheel_angle_deg - self.last_expected_wheel_angle_deg
+      if requested_active and self.last_expected_wheel_angle_deg is not None else 0.0
+    )
+    self.last_nudge_angle_deg = (
+      compute_nudge_angle_deg(
+        wheel_steering,
+        self.last_expected_wheel_angle_deg,
+        inner_deadband_deg=self.inner_deadband_deg,
+        full_assist_error_deg=self.full_assist_error_deg,
+      )
+      if active and self.last_expected_wheel_angle_deg is not None
+      else 0.0
+    )
+
+    if now - self.last_publish_time < self.publish_interval_s:
+      return False
 
     msg = messaging.new_message("turboSteerAssist")
     msg.valid = True
@@ -205,6 +293,19 @@ def _make_torque_controller(g29):
   return SteeringTorqueController(g29, config=config)
 
 
+def _make_assist_torque_controller(g29):
+  from g29py.advanced import SteeringTorqueConfig, SteeringTorqueController
+
+  config = SteeringTorqueConfig(
+    park_force=STEER_ASSIST_HAPTIC_FORCE,
+    rolling_force=STEER_ASSIST_HAPTIC_FORCE,
+    park_friction=STEER_ASSIST_HAPTIC_FRICTION,
+    rolling_friction=STEER_ASSIST_HAPTIC_FRICTION,
+    force_response_velocity_m_s=TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S,
+  )
+  return SteeringTorqueController(g29, config=config)
+
+
 def _run(g29_sock, steer_assist_sock) -> None:
   from g29py import G29
 
@@ -213,6 +314,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
     g29 = G29()
     g29.set_range(400)
     torque_controller = _make_torque_controller(g29)
+    assist_torque_controller = _make_assist_torque_controller(g29)
     speed_source = SpeedSource()
     assist_target_source = AssistTargetSource()
     steer_assist_publisher = SteerAssistNudgePublisher(steer_assist_sock)
@@ -228,6 +330,10 @@ def _run(g29_sock, steer_assist_sock) -> None:
         f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
         f"steer_assist_inner_deadband={DEFAULT_INNER_DEADBAND_DEG:.1f}deg",
         f"steer_assist_full_error={DEFAULT_FULL_ASSIST_ERROR_DEG:.1f}deg",
+        f"steer_assist_response_delay={STEER_ASSIST_RESPONSE_DELAY_S:.2f}s",
+        f"steer_assist_engage_warmup={STEER_ASSIST_ENGAGE_WARMUP_S:.2f}s",
+        f"steer_assist_haptic_force={STEER_ASSIST_HAPTIC_FORCE:.2f}",
+        f"steer_assist_haptic_friction={STEER_ASSIST_HAPTIC_FRICTION:.2f}",
         f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
         f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
       )),
@@ -242,11 +348,18 @@ def _run(g29_sock, steer_assist_sock) -> None:
 
       velocity, speed_source_name = speed_source.update(state)
       target_steering, assist_target_name = assist_target_source.update()
-      steer_assist_publisher.update(state, target_steering, assist_target_source.last_target_angle_deg)
-      command = torque_controller.update(
+      active_torque_controller = assist_torque_controller if target_steering is not None else torque_controller
+      command = active_torque_controller.update(
         longitudinal_velocity_m_s=velocity,
         steering=state["steering"],
         target_steering=target_steering,
+      )
+      haptic_target_angle_deg = _effect_position_to_steering_angle_deg(command.target_position)
+      steer_assist_publisher.update(
+        state,
+        target_steering,
+        assist_target_source.last_target_angle_deg,
+        haptic_target_angle_deg,
       )
       if frame % LOG_INTERVAL_FRAMES == 0:
         carstate_age = speed_source.last_carstate_age_s
@@ -262,6 +375,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
         target_steering_text = "none" if target_steering is None else f"{target_steering:.3f}"
         applied_angle = assist_target_source.last_applied_angle_deg
         applied_angle_text = "none" if applied_angle is None else f"{applied_angle:.2f}deg"
+        expected_angle = steer_assist_publisher.last_expected_wheel_angle_deg
+        expected_angle_text = "none" if expected_angle is None else f"{expected_angle:.2f}deg"
         print(
           " ".join((
             "g29d torque_sim",
@@ -275,8 +390,12 @@ def _run(g29_sock, steer_assist_sock) -> None:
             f"target_angle={target_angle_text}",
             f"applied_angle={applied_angle_text}",
             f"target_steering={target_steering_text}",
+            f"observer={steer_assist_publisher.last_observer_status}",
+            f"haptic_target={haptic_target_angle_deg:.2f}deg",
+            f"expected_wheel={expected_angle_text}",
             f"wheel_angle={steer_assist_publisher.last_wheel_angle_deg:.2f}deg",
-            f"angle_error={steer_assist_publisher.last_angle_error_deg:.2f}deg",
+            f"model_error={steer_assist_publisher.last_angle_error_deg:.2f}deg",
+            f"residual={steer_assist_publisher.last_residual_angle_deg:.2f}deg",
             f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
             f"factor={command.speed_factor:.2f}",
             f"force_factor={command.force_factor:.2f}",
