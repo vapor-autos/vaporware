@@ -58,15 +58,13 @@ def ffmpeg_bin() -> str:
   return "ffmpeg"
 
 
-def capture_paths() -> tuple[Path, Path]:
+def capture_path() -> Path:
   CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
   timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   for suffix in ["", *[f"_{i}" for i in range(1, 100)]]:
-    stem = f"screencap_{timestamp}{suffix}"
-    final_path = CAPTURES_DIR / f"{stem}.mp4"
-    tmp_path = CAPTURES_DIR / f".{stem}.tmp.mp4"
-    if not final_path.exists() and not tmp_path.exists():
-      return final_path, tmp_path
+    path = CAPTURES_DIR / f"screencap_{timestamp}{suffix}.mp4"
+    if not path.exists():
+      return path
   raise SystemExit(f"could not choose a capture filename in {CAPTURES_DIR}")
 
 
@@ -79,9 +77,12 @@ def main() -> int:
   args = parser.parse_args()
 
   size = args.size or display_size(args.display)
-  final_path, tmp_path = capture_paths()
+  output_path = capture_path()
+  ffmpeg = ffmpeg_bin()
+  # Do not use +faststart here. Its in-place second pass can corrupt mdat if
+  # finalization is interrupted, and local captures do not need it.
   cmd = [
-    ffmpeg_bin(),
+    ffmpeg,
     "-hide_banner",
     "-loglevel", "warning",
     "-y",
@@ -94,27 +95,34 @@ def main() -> int:
     "-preset", DEFAULT_PRESET,
     "-crf", str(DEFAULT_CRF),
     "-pix_fmt", "yuv420p",
-    "-movflags", "+faststart",
   ]
   if args.duration is not None:
     cmd += ["-t", str(args.duration)]
-  cmd.append(str(tmp_path))
+  cmd.append(str(output_path))
 
-  print(f"recording {args.display} {size} @ {args.fps}fps -> {final_path}")
-  proc = subprocess.Popen(cmd)
+  print(f"recording {args.display} {size} @ {args.fps}fps -> {output_path}")
+  # Keep ffmpeg out of the terminal's foreground process group. Otherwise one
+  # Ctrl-C signals both processes and this handler sends ffmpeg a second SIGINT
+  # while it is flushing the encoder or writing the MP4 index.
+  proc = subprocess.Popen(cmd, start_new_session=True)
+  interrupted = False
   try:
     proc.wait()
   except KeyboardInterrupt:
+    interrupted = True
+    print("\nstopping recording; waiting for ffmpeg to finalize the MP4...", file=sys.stderr)
     proc.send_signal(signal.SIGINT)
-    proc.wait()
+    while proc.poll() is None:
+      try:
+        proc.wait()
+      except KeyboardInterrupt:
+        print("\nalready finalizing; please wait...", file=sys.stderr)
 
-  if proc.returncode in (0, 255) and tmp_path.exists() and tmp_path.stat().st_size > 0:
-    tmp_path.replace(final_path)
-    print(final_path)
+  expected_exit = proc.returncode == 0 or (interrupted and proc.returncode == 255)
+  if expected_exit:
+    print(output_path)
     return 0
 
-  if tmp_path.exists():
-    tmp_path.unlink()
   return proc.returncode or 1
 
 
