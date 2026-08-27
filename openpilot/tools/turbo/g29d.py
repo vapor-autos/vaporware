@@ -10,6 +10,7 @@ from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
   g29_steering_to_angle_deg,
   steering_angle_to_g29_target,
 )
+from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, write_metrics_payload
 
 RETRY_DELAY = 2.0
 PUBLISH_INTERVAL = 0.02
@@ -24,6 +25,7 @@ STEER_ASSIST_RESPONSE_DELAY_S = 0.12
 STEER_ASSIST_ENGAGE_WARMUP_S = 0.5
 STEER_ASSIST_HAPTIC_FORCE = 0.4
 STEER_ASSIST_HAPTIC_FRICTION = 0.25
+STEER_ASSIST_METRICS_NAME = "g29-steer-assist"
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -318,6 +320,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
     speed_source = SpeedSource()
     assist_target_source = AssistTargetSource()
     steer_assist_publisher = SteerAssistNudgePublisher(steer_assist_sock)
+    steer_assist_metrics_file = default_latest_json_path(STEER_ASSIST_METRICS_NAME)
     g29.listen()
 
     print(
@@ -404,6 +407,32 @@ def _run(g29_sock, steer_assist_sock) -> None:
             f"friction={command.friction:.2f}",
           )),
           flush=True,
+        )
+        write_metrics_payload(
+          {
+            "steer_assist": {
+              "requested_active": target_steering is not None,
+              "active": steer_assist_publisher.last_active,
+              "observer_status": steer_assist_publisher.last_observer_status,
+              "response_delay_s": STEER_ASSIST_RESPONSE_DELAY_S,
+              "engage_warmup_s": STEER_ASSIST_ENGAGE_WARMUP_S,
+              "velocity_m_s": velocity,
+              "controlsstate_age_s": controlsstate_age,
+              "selfdrive_age_s": selfdrive_age,
+              "model_target_angle_deg": target_angle,
+              "applied_angle_deg": applied_angle,
+              "haptic_target_angle_deg": haptic_target_angle_deg,
+              "expected_wheel_angle_deg": expected_angle,
+              "wheel_angle_deg": steer_assist_publisher.last_wheel_angle_deg,
+              "model_error_deg": steer_assist_publisher.last_angle_error_deg,
+              "residual_deg": steer_assist_publisher.last_residual_angle_deg,
+              "nudge_deg": steer_assist_publisher.last_nudge_angle_deg,
+              "force": command.force,
+              "friction": command.friction,
+            },
+          },
+          latest_file=steer_assist_metrics_file,
+          print_line=False,
         )
 
       _publish_state(g29_sock, state, events)
