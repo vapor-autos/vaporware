@@ -139,7 +139,6 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
     self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_packets: dict[str, int] = dict.fromkeys(self.services, 0)
-    self.aborted: dict[str, int] = dict.fromkeys(self.services, 0)
     self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
     self.max_observed_buffered_amount = 0
@@ -176,7 +175,6 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     return {
       "sent": dict(self.sent),
       "sent_packets": dict(self.sent_packets),
-      "aborted": dict(self.aborted),
       "skipped": dict(self.skipped),
       "sent_bytes": dict(self.sent_bytes),
       "pending": dict(self.pending_send),
@@ -193,19 +191,6 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     return json.dumps(outgoing_msg).encode()
 
   def _update_framed_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
-    critical_services = set(FEEDBACK_SERVICE_PRIORITIES)
-    critical_pending = any(
-      self.pending_send[service] and self.should_send(service, now)
-      for service in self.services
-      if service in critical_services
-    )
-    if self.packet_queue and self.packet_service not in critical_services and critical_pending:
-      assert self.packet_service is not None
-      self.aborted[self.packet_service] += 1
-      self.pending_send[self.packet_service] = True
-      self.packet_queue.clear()
-      self.packet_service = None
-
     packets_sent = 0
     while packets_sent < FEEDBACK_MAX_PACKETS_PER_UPDATE:
       buffered_amount = self.buffered_amount()

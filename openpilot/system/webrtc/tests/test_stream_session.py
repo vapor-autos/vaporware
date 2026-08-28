@@ -161,7 +161,6 @@ class TestStreamSession:
     proxy.add_channel(channel)
     proxy.sent["carState"] = 7
     proxy.sent_packets["carState"] = 9
-    proxy.aborted["carState"] = 1
     proxy.skipped["carState"] = 2
     proxy.sent_bytes["carState"] = 1024
     proxy.pending_send["carState"] = True
@@ -170,7 +169,6 @@ class TestStreamSession:
     assert proxy.feedback_metrics() == {
       "sent": {"carState": 7},
       "sent_packets": {"carState": 9},
-      "aborted": {"carState": 1},
       "skipped": {"carState": 2},
       "sent_bytes": {"carState": 1024},
       "pending": {"carState": True},
@@ -233,6 +231,34 @@ class TestStreamSession:
     assert channel.send.call_count == 3
     assert proxy.sent["carState"] == 1
     assert proxy.sent_packets["carState"] == 3
+
+  def test_outgoing_proxy_finishes_model_message_when_critical_feedback_arrives(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    model_msg = messaging.new_message("modelV2")
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["modelV2", "carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg, model_msg])
+
+    def mocked_packets(payload, message_id):
+      service = json.loads(payload)["type"]
+      return [f"{service}-{message_id}-{index}".encode() for index in range(4 if service == "modelV2" else 1)]
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.encode_feedback_packets", side_effect=mocked_packets)
+    proxy.add_channel(channel)
+
+    proxy.update()
+    proxy.update()
+    proxy.update()
+
+    sent_packets = [call.args[0].decode() for call in channel.send.call_args_list]
+    assert sent_packets == ["carState-1-0", "modelV2-2-0", "modelV2-2-1", "modelV2-2-2", "modelV2-2-3"]
+    assert proxy.sent["modelV2"] == 1
+    assert proxy.pending_send["carState"]
 
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
