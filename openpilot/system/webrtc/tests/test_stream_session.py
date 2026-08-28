@@ -161,6 +161,7 @@ class TestStreamSession:
     proxy.add_channel(channel)
     proxy.sent["carState"] = 7
     proxy.sent_packets["carState"] = 9
+    proxy.aborted["carState"] = 1
     proxy.skipped["carState"] = 2
     proxy.sent_bytes["carState"] = 1024
     proxy.pending_send["carState"] = True
@@ -169,6 +170,7 @@ class TestStreamSession:
     assert proxy.feedback_metrics() == {
       "sent": {"carState": 7},
       "sent_packets": {"carState": 9},
+      "aborted": {"carState": 1},
       "skipped": {"carState": 2},
       "sent_bytes": {"carState": 1024},
       "pending": {"carState": True},
@@ -203,6 +205,34 @@ class TestStreamSession:
     assert assembled is not None
     assert json.loads(assembled)["data"]["vEgo"] == 1.5
     assert proxy.sent_packets["carState"] == channel.send.call_count
+
+  def test_outgoing_proxy_paces_framed_feedback_packets(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg])
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.encode_feedback_packets", return_value=[b"one", b"two", b"three"])
+    proxy.add_channel(channel)
+
+    proxy.update()
+    assert channel.send.call_count == 2
+    assert proxy.sent["carState"] == 0
+    assert proxy.sent_packets["carState"] == 2
+
+    proxy.update()
+    assert channel.send.call_count == 3
+    assert proxy.sent["carState"] == 1
+    assert proxy.sent_packets["carState"] == 3
 
   def test_incoming_proxy(self, mocker):
     tested_msgs = [

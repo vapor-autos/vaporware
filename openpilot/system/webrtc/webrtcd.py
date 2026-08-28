@@ -7,6 +7,7 @@ import time
 import argparse
 import asyncio
 import contextlib
+from collections import deque
 import json
 import uuid
 import logging
@@ -95,7 +96,8 @@ FEEDBACK_SERVICE_RATES_HZ = {
   "onroadEvents": 5.0,
 }
 FEEDBACK_DEFAULT_RATE_HZ = 10.0
-FEEDBACK_MAX_BUFFERED_AMOUNT = 16 * 1024
+FEEDBACK_MAX_BUFFERED_AMOUNT = 1024
+FEEDBACK_MAX_PACKETS_PER_UPDATE = 2
 FEEDBACK_LOG_INTERVAL = 5.0
 FEEDBACK_CHANNEL_WAIT_TIMEOUT = 2.0
 FEEDBACK_SERVICE_PRIORITIES = {
@@ -137,10 +139,13 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
     self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_packets: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.aborted: dict[str, int] = dict.fromkeys(self.services, 0)
     self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
     self.max_observed_buffered_amount = 0
     self.feedback_sequence = 0
+    self.packet_queue: deque[bytes] = deque()
+    self.packet_service: str | None = None
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -171,6 +176,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     return {
       "sent": dict(self.sent),
       "sent_packets": dict(self.sent_packets),
+      "aborted": dict(self.aborted),
       "skipped": dict(self.skipped),
       "sent_bytes": dict(self.sent_bytes),
       "pending": dict(self.pending_send),
@@ -180,6 +186,83 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
       "channels": len(self.channels),
     }
 
+  def _encode_message(self, service: str) -> bytes:
+    msg_dict = project_feedback_message(service, self.sm[service])
+    mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
+    outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
+    return json.dumps(outgoing_msg).encode()
+
+  def _update_framed_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
+    critical_services = set(FEEDBACK_SERVICE_PRIORITIES)
+    critical_pending = any(
+      self.pending_send[service] and self.should_send(service, now)
+      for service in self.services
+      if service in critical_services
+    )
+    if self.packet_queue and self.packet_service not in critical_services and critical_pending:
+      assert self.packet_service is not None
+      self.aborted[self.packet_service] += 1
+      self.pending_send[self.packet_service] = True
+      self.packet_queue.clear()
+      self.packet_service = None
+
+    packets_sent = 0
+    while packets_sent < FEEDBACK_MAX_PACKETS_PER_UPDATE:
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        if self.packet_service is not None:
+          self.skipped[self.packet_service] += 1
+        break
+
+      if not self.packet_queue:
+        service = next(
+          (
+            candidate for candidate in self.services
+            if self.pending_send[candidate] and self.should_send(candidate, now)
+          ),
+          None,
+        )
+        if service is None:
+          break
+        self.feedback_sequence = (self.feedback_sequence + 1) & 0xFFFFFFFF
+        self.packet_queue.extend(encode_feedback_packets(self._encode_message(service), self.feedback_sequence))
+        self.packet_service = service
+        self.pending_send[service] = False
+
+      assert self.packet_service is not None
+      packet = self.packet_queue.popleft()
+      for channel in channels:
+        channel.send(packet)
+      self.sent_packets[self.packet_service] += 1
+      self.sent_bytes[self.packet_service] += len(packet)
+      packets_sent += 1
+
+      if not self.packet_queue:
+        self.last_send_time[self.packet_service] = now
+        self.sent[self.packet_service] += 1
+        self.packet_service = None
+
+  def _update_legacy_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
+    for service in self.services:
+      if not self.pending_send[service] or not self.should_send(service, now):
+        continue
+
+      encoded_msg = self._encode_message(service)
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        self.skipped[service] += 1
+        continue
+
+      for channel in channels:
+        channel.send(encoded_msg)
+      self.last_send_time[service] = now
+      self.pending_send[service] = False
+      self.sent[service] += 1
+      self.sent_packets[service] += 1
+      self.sent_bytes[service] += len(encoded_msg)
+
   def update(self):
     # this is blocking in async context...
     self.sm.update(0)
@@ -187,37 +270,13 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     for service in self.services:
       if self.sm.updated[service]:
         self.pending_send[service] = True
-      if not self.pending_send[service]:
-        continue
-      if not self.should_send(service, now):
-        continue
-      msg_dict = project_feedback_message(service, self.sm[service])
-      mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
-      outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
-      encoded_msg = json.dumps(outgoing_msg).encode()
 
-      buffered_amount = self.buffered_amount()
-      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
-      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
-        self.skipped[service] += 1
-        continue
-
-      feedback_channels = [channel for channel in self.channels if channel.label == FEEDBACK_DATA_CHANNEL_LABEL]
-      legacy_channels = [channel for channel in self.channels if channel.label != FEEDBACK_DATA_CHANNEL_LABEL]
-      feedback_packets: list[bytes] = []
-      if feedback_channels:
-        self.feedback_sequence = (self.feedback_sequence + 1) & 0xFFFFFFFF
-        feedback_packets = encode_feedback_packets(encoded_msg, self.feedback_sequence)
-        for channel in feedback_channels:
-          for packet in feedback_packets:
-            channel.send(packet)
-      for channel in legacy_channels:
-        channel.send(encoded_msg)
-      self.last_send_time[service] = now
-      self.pending_send[service] = False
-      self.sent[service] += 1
-      self.sent_packets[service] += len(feedback_packets) if feedback_packets else 1
-      self.sent_bytes[service] += sum(map(len, feedback_packets)) if feedback_packets else len(encoded_msg)
+    feedback_channels = [channel for channel in self.channels if channel.label == FEEDBACK_DATA_CHANNEL_LABEL]
+    legacy_channels = [channel for channel in self.channels if channel.label != FEEDBACK_DATA_CHANNEL_LABEL]
+    if feedback_channels:
+      self._update_framed_feedback(feedback_channels, now)
+    if legacy_channels:
+      self._update_legacy_feedback(legacy_channels, now)
 
   def log_stats(self):
     sent_counts = " ".join(f"{service}={count}" for service, count in self.sent.items())
