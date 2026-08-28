@@ -1,3 +1,7 @@
+import math
+
+import pytest
+
 from openpilot.cereal import messaging
 from openpilot.tools.turbo.g29d import (
   AssistTargetSource,
@@ -8,7 +12,6 @@ from openpilot.tools.turbo.g29d import (
   _make_assist_torque_controller,
   _steering_angle_to_g29_target,
 )
-import pytest
 
 
 class FakeCarState:
@@ -127,6 +130,21 @@ class FakeG29Effects:
     self.friction_calls.append(friction)
 
 
+def make_steer_assist_publisher(sock, **kwargs):
+  options = {
+    "response_tau_s": 0.0,
+    "engage_warmup_s": 0.0,
+    "max_target_step_deg": 1e6,
+    "max_target_rate_deg_s": 1e6,
+    "target_recovery_s": 0.0,
+    "override_persistence_s": 0.0,
+    "nudge_filter_tau_s": 0.0,
+    "max_nudge_rate_deg_s": 1e6,
+  }
+  options.update(kwargs)
+  return SteerAssistNudgePublisher(sock, **options)
+
+
 def test_speed_source_uses_fresh_carstate_speed():
   sm = FakeSubMaster(seen=True, valid=True, recv_time=10.0, v_ego=-3.5)
   source = SpeedSource(sm=sm, stale_timeout_s=0.25)
@@ -184,23 +202,24 @@ def test_effect_position_to_steering_angle_deg_matches_g29_quantization():
   assert _effect_position_to_steering_angle_deg(0.5) == pytest.approx(-180.0 / 255.0)
 
 
-def test_passive_wheel_observer_interpolates_delayed_target_history():
-  observer = PassiveWheelObserver(response_delay_s=0.12)
+def test_passive_wheel_observer_models_first_order_response():
+  observer = PassiveWheelObserver(response_tau_s=0.12)
 
-  assert observer.update(0.0, now=10.0) is None
-  assert observer.update(100.0, now=10.1) is None
-  assert observer.update(100.0, now=10.12) == pytest.approx(0.0)
-  assert observer.update(100.0, now=10.16) == pytest.approx(40.0)
+  assert observer.update(0.0, now=10.0) == pytest.approx(0.0)
+  first = observer.update(100.0, now=10.12)
+  assert first == pytest.approx(100.0 * (1.0 - math.exp(-1.0)))
+  second = observer.update(100.0, now=10.24)
+  assert second == pytest.approx(first + (100.0 - first) * (1.0 - math.exp(-1.0)))
   assert observer.ready
 
 
 def test_passive_wheel_observer_resets_on_non_monotonic_time():
-  observer = PassiveWheelObserver(response_delay_s=0.12)
+  observer = PassiveWheelObserver(response_tau_s=0.12)
   observer.update(0.0, now=10.0)
   observer.update(10.0, now=10.2)
 
-  assert observer.update(20.0, now=9.0) is None
-  assert not observer.ready
+  assert observer.update(20.0, now=9.0) == pytest.approx(20.0)
+  assert observer.ready
 
 
 def test_assist_torque_controller_uses_fixed_engaged_tune():
@@ -336,7 +355,7 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
 
 def test_steer_assist_nudge_publisher_sends_active_nudge_message():
   sock = FakeSocket()
-  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05, response_delay_s=0.0, engage_warmup_s=0.0)
+  publisher = make_steer_assist_publisher(sock, publish_interval_s=0.05)
 
   assert publisher.update(
     {"steering": -0.6},
@@ -358,45 +377,99 @@ def test_steer_assist_nudge_publisher_sends_active_nudge_message():
   assert publisher.last_residual_angle_deg == pytest.approx(18.0)
 
 
-def test_steer_assist_nudge_publisher_ignores_passive_wheel_delay():
+def test_steer_assist_nudge_publisher_ignores_passive_wheel_response():
   sock = FakeSocket()
-  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.0, response_delay_s=0.12, engage_warmup_s=0.0)
-
-  for frame in range(10):
-    now = frame * 0.02
-    target_angle_deg = 0.0 if now < 0.1 else 20.0
-    target_steering = _steering_angle_to_g29_target(target_angle_deg)
-    assert publisher.update(
-      {"steering": 0.0},
-      target_steering=target_steering,
-      target_steering_angle_deg=target_angle_deg,
-      haptic_target_angle_deg=target_angle_deg,
-      now=now,
-    )
-
-  msg = messaging.log_from_bytes(sock.sent[-1])
-  assert msg.turboSteerAssist.active
-  assert publisher.last_angle_error_deg == pytest.approx(-20.0)
-  assert publisher.last_expected_wheel_angle_deg == pytest.approx(0.0)
-  assert publisher.last_residual_angle_deg == pytest.approx(0.0)
-  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+  publisher = make_steer_assist_publisher(sock, publish_interval_s=0.0, response_tau_s=0.12)
 
   assert publisher.update(
-    {"steering": -10.0 / 180.0},
+    {"steering": 0.0},
+    target_steering=0.0,
+    target_steering_angle_deg=0.0,
+    haptic_target_angle_deg=0.0,
+    now=0.0,
+  )
+
+  expected_angle_deg = 20.0 * (1.0 - math.exp(-0.02 / 0.12))
+  assert publisher.update(
+    {"steering": -expected_angle_deg / 180.0},
     target_steering=_steering_angle_to_g29_target(20.0),
     target_steering_angle_deg=20.0,
     haptic_target_angle_deg=20.0,
-    now=0.2,
+    now=0.02,
+  )
+
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert msg.turboSteerAssist.active
+  assert publisher.last_angle_error_deg == pytest.approx(expected_angle_deg - 20.0)
+  assert publisher.last_expected_wheel_angle_deg == pytest.approx(expected_angle_deg)
+  assert publisher.last_residual_angle_deg == pytest.approx(0.0)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+  expected_angle_deg += (20.0 - expected_angle_deg) * (1.0 - math.exp(-0.02 / 0.12))
+  assert publisher.update(
+    {"steering": -(expected_angle_deg + 10.0) / 180.0},
+    target_steering=_steering_angle_to_g29_target(20.0),
+    target_steering_angle_deg=20.0,
+    haptic_target_angle_deg=20.0,
+    now=0.04,
   )
   msg = messaging.log_from_bytes(sock.sent[-1])
-  assert publisher.last_expected_wheel_angle_deg == pytest.approx(0.0)
+  assert publisher.last_expected_wheel_angle_deg == pytest.approx(expected_angle_deg)
   assert publisher.last_residual_angle_deg == pytest.approx(10.0)
   assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(10.0)
 
 
+def test_steer_assist_nudge_publisher_gates_abrupt_target_changes():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(
+    sock,
+    publish_interval_s=0.0,
+    response_tau_s=0.12,
+    max_target_step_deg=15.0,
+    max_target_rate_deg_s=300.0,
+    target_recovery_s=0.4,
+  )
+
+  assert publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  assert publisher.update({"steering": 0.0}, -20.0 / 180.0, 20.0, 20.0, now=10.1)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert not msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+  assert publisher.last_observer_status == "target_unstable"
+
+  assert publisher.update({"steering": -20.0 / 180.0}, -20.0 / 180.0, 20.0, 20.0, now=10.51)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert msg.turboSteerAssist.active
+  assert publisher.last_observer_status == "ready"
+
+
+def test_steer_assist_nudge_publisher_requires_persistence_and_rate_limits():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(
+    sock,
+    publish_interval_s=0.0,
+    override_persistence_s=0.1,
+    max_nudge_rate_deg_s=100.0,
+  )
+
+  assert publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  assert publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  assert publisher.last_override_status == "candidate"
+  assert publisher.last_nudge_angle_deg == pytest.approx(0.0)
+
+  assert publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.13)
+  assert publisher.last_override_status == "active"
+  assert publisher.last_raw_nudge_angle_deg == pytest.approx(20.0)
+  assert publisher.last_nudge_angle_deg == pytest.approx(11.0)
+
+  assert publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.15)
+  assert publisher.last_override_status == "releasing"
+  assert publisher.last_nudge_angle_deg == pytest.approx(9.0)
+
+
 def test_steer_assist_nudge_publisher_suppresses_engage_warmup():
   sock = FakeSocket()
-  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.0, response_delay_s=0.0, engage_warmup_s=0.5)
+  publisher = make_steer_assist_publisher(sock, publish_interval_s=0.0, engage_warmup_s=0.5)
 
   assert publisher.update(
     {"steering": -20.0 / 180.0},
@@ -424,7 +497,7 @@ def test_steer_assist_nudge_publisher_suppresses_engage_warmup():
 
 def test_steer_assist_nudge_publisher_rate_limits_and_sends_inactive():
   sock = FakeSocket()
-  publisher = SteerAssistNudgePublisher(sock, publish_interval_s=0.05, response_delay_s=0.0, engage_warmup_s=0.0)
+  publisher = make_steer_assist_publisher(sock, publish_interval_s=0.05)
 
   assert publisher.update(
     {"steering": -0.6},
