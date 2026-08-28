@@ -20,6 +20,7 @@ TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
 TORQUE_SIM_CARSTATE_STALE_S = 0.25
 TORQUE_SIM_ASSIST_STALE_S = 0.25
+TORQUE_SIM_ASSIST_STALE_GRACE_S = 0.15
 STEER_ASSIST_TRACKING_ERROR_DEG = 5.0
 STEER_ASSIST_TRACKING_DURATION_S = 0.3
 STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S = 10.0
@@ -103,15 +104,24 @@ class SpeedSource:
 
 
 class AssistTargetSource:
-  def __init__(self, sm: messaging.SubMaster | None = None, stale_timeout_s: float = TORQUE_SIM_ASSIST_STALE_S):
+  def __init__(
+    self,
+    sm: messaging.SubMaster | None = None,
+    stale_timeout_s: float = TORQUE_SIM_ASSIST_STALE_S,
+    stale_grace_s: float = TORQUE_SIM_ASSIST_STALE_GRACE_S,
+  ):
     self.sm = messaging.SubMaster(["controlsState", "selfdriveState", "carOutput"]) if sm is None else sm
     self.stale_timeout_s = stale_timeout_s
+    self.stale_grace_s = max(0.0, stale_grace_s)
     self.last_controlsstate_age_s: float | None = None
     self.last_caroutput_age_s: float | None = None
     self.last_selfdrive_age_s: float | None = None
     self.last_target_angle_deg: float | None = None
     self.last_target_log_mono_time = 0
+    self.last_target_fresh = False
     self.last_applied_angle_deg: float | None = None
+    self._cached_target_angle_deg: float | None = None
+    self._cached_target_log_mono_time = 0
 
   def update(self, now: float | None = None) -> tuple[float | None, str]:
     self.sm.update(0)
@@ -121,27 +131,53 @@ class AssistTargetSource:
     self.last_selfdrive_age_s = self._age("selfdriveState", now)
     self.last_target_angle_deg = None
     self.last_target_log_mono_time = 0
+    self.last_target_fresh = False
     self.last_applied_angle_deg = self._applied_angle_deg()
 
     if not self._fresh("selfdriveState"):
-      return None, "selfdriveState_stale"
+      return self._stale_target("selfdriveState_stale")
 
     selfdrive_state = self.sm["selfdriveState"]
     if not (bool(selfdrive_state.enabled) or bool(selfdrive_state.active)):
+      self._clear_cached_target()
       return None, "disengaged"
 
     if not self._fresh("controlsState"):
-      return None, "controlsState_stale"
+      return self._stale_target("controlsState_stale")
 
     controls_state = self.sm["controlsState"]
     lateral_state = controls_state.lateralControlState
     if lateral_state.which() != "angleState":
+      self._clear_cached_target()
       return None, "controlsState_not_angle"
 
     angle_deg = float(lateral_state.angleState.steeringAngleDesiredDeg)
     self.last_target_angle_deg = angle_deg
     self.last_target_log_mono_time = int(self.sm.logMonoTime["controlsState"])
+    self.last_target_fresh = True
+    self._cached_target_angle_deg = angle_deg
+    self._cached_target_log_mono_time = self.last_target_log_mono_time
     return _steering_angle_to_g29_target(angle_deg), "controlsState"
+
+  def _clear_cached_target(self) -> None:
+    self._cached_target_angle_deg = None
+    self._cached_target_log_mono_time = 0
+
+  def _stale_target(self, reason: str) -> tuple[float | None, str]:
+    services = ("selfdriveState", "controlsState")
+    ages = (self.last_selfdrive_age_s, self.last_controlsstate_age_s)
+    stale_limit_s = self.stale_timeout_s + self.stale_grace_s
+    valid_feedback = all(self.sm.seen[service] and self.sm.valid[service] for service in services)
+    within_grace = all(age is not None and age <= stale_limit_s for age in ages)
+    selfdrive_state = self.sm["selfdriveState"]
+    last_engaged = bool(selfdrive_state.enabled) or bool(selfdrive_state.active)
+    if self._cached_target_angle_deg is None or not valid_feedback or not within_grace or not last_engaged:
+      self._clear_cached_target()
+      return None, reason
+
+    self.last_target_angle_deg = self._cached_target_angle_deg
+    self.last_target_log_mono_time = self._cached_target_log_mono_time
+    return _steering_angle_to_g29_target(self.last_target_angle_deg), "feedback_stale_hold"
 
   def _age(self, service: str, now: float) -> float | None:
     return now - self.sm.recv_time[service] if self.sm.seen[service] else None
@@ -229,8 +265,10 @@ class SteerAssistNudgePublisher:
     self.last_relative_velocity_deg_s = 0.0
     self.last_haptic_target_angle_deg: float | None = None
     self.last_model_target_angle_deg: float | None = None
+    self.last_model_target_log_mono_time = 0
     self.last_target_step_deg = 0.0
     self.last_target_rate_deg_s = 0.0
+    self.last_target_interval_s: float | None = None
     self.last_haptic_target_rate_deg_s = 0.0
     self.last_update_time: float | None = None
     self.last_motion_wheel_angle_deg: float | None = None
@@ -251,10 +289,12 @@ class SteerAssistNudgePublisher:
     self.last_motion_wheel_angle_deg = None
     self.last_haptic_target_angle_deg = None
     self.last_model_target_angle_deg = None
+    self.last_model_target_log_mono_time = 0
     self.last_wheel_velocity_deg_s = 0.0
     self.last_relative_velocity_deg_s = 0.0
     self.last_target_step_deg = 0.0
     self.last_target_rate_deg_s = 0.0
+    self.last_target_interval_s = None
     self.last_haptic_target_rate_deg_s = 0.0
 
   def _update_motion(
@@ -262,6 +302,7 @@ class SteerAssistNudgePublisher:
     wheel_angle_deg: float,
     model_target_angle_deg: float,
     haptic_target_angle_deg: float,
+    base_target_log_mono_time: int,
     now: float,
   ) -> bool:
     if self.last_update_time is None or now <= self.last_update_time:
@@ -269,6 +310,7 @@ class SteerAssistNudgePublisher:
       self.last_update_time = now
       self.last_motion_wheel_angle_deg = wheel_angle_deg
       self.last_model_target_angle_deg = model_target_angle_deg
+      self.last_model_target_log_mono_time = base_target_log_mono_time
       self.last_haptic_target_angle_deg = haptic_target_angle_deg
       return False
 
@@ -278,15 +320,43 @@ class SteerAssistNudgePublisher:
     self.last_wheel_velocity_deg_s += (raw_wheel_velocity_deg_s - self.last_wheel_velocity_deg_s) * alpha
 
     self.last_target_step_deg = model_target_angle_deg - self.last_model_target_angle_deg
-    self.last_target_rate_deg_s = self.last_target_step_deg / dt
+    target_timestamp_invalid = False
+    if base_target_log_mono_time > 0 and self.last_model_target_log_mono_time > 0:
+      target_interval_s = (base_target_log_mono_time - self.last_model_target_log_mono_time) / 1e9
+      self.last_target_interval_s = target_interval_s
+      if target_interval_s > 0.0:
+        self.last_target_rate_deg_s = self.last_target_step_deg / target_interval_s
+      elif target_interval_s == 0.0 and self.last_target_step_deg == 0.0:
+        self.last_target_rate_deg_s = 0.0
+      else:
+        self.last_target_rate_deg_s = self.last_target_step_deg / dt
+        target_timestamp_invalid = True
+    else:
+      self.last_target_interval_s = dt
+      self.last_target_rate_deg_s = self.last_target_step_deg / dt
     self.last_haptic_target_rate_deg_s = (haptic_target_angle_deg - self.last_haptic_target_angle_deg) / dt
     self.last_relative_velocity_deg_s = self.last_wheel_velocity_deg_s - self.last_haptic_target_rate_deg_s
 
     self.last_update_time = now
     self.last_motion_wheel_angle_deg = wheel_angle_deg
     self.last_model_target_angle_deg = model_target_angle_deg
+    self.last_model_target_log_mono_time = base_target_log_mono_time
     self.last_haptic_target_angle_deg = haptic_target_angle_deg
-    return abs(self.last_target_step_deg) > self.max_target_step_deg or abs(self.last_target_rate_deg_s) > self.max_target_rate_deg_s
+    return (
+      target_timestamp_invalid
+      or abs(self.last_target_step_deg) > self.max_target_step_deg
+      or abs(self.last_target_rate_deg_s) > self.max_target_rate_deg_s
+    )
+
+  def _hold_detection_for_stale_target(self, now: float) -> None:
+    if self.last_tracking_status == "candidate":
+      self.last_tracking_status = "tracking"
+      self.candidate_since = None
+      self.candidate_error_sign = 0.0
+    elif self.last_tracking_status == "acquiring_tracking":
+      self.tracking_since = now
+    self.last_raw_nudge_angle_deg = 0.0
+    self.last_nudge_angle_deg = 0.0
 
   def _update_detection(self, target_unstable: bool, now: float) -> None:
     error_deg = self.last_residual_angle_deg
@@ -343,6 +413,7 @@ class SteerAssistNudgePublisher:
     target_steering_angle_deg: float | None,
     haptic_target_angle_deg: float,
     base_target_log_mono_time: int = 0,
+    input_fresh: bool = True,
     now: float | None = None,
   ) -> bool:
     now = time.monotonic() if now is None else now
@@ -354,19 +425,22 @@ class SteerAssistNudgePublisher:
     self.last_angle_error_deg = self.last_wheel_angle_deg - float(target_steering_angle_deg) if requested_active else 0.0
     self.last_residual_angle_deg = self.last_wheel_angle_deg - haptic_target_angle_deg if requested_active else 0.0
 
-    if requested_active:
+    if requested_active and input_fresh:
       target_unstable = self._update_motion(
         self.last_wheel_angle_deg,
         float(target_steering_angle_deg),
         haptic_target_angle_deg,
+        base_target_log_mono_time,
         now,
       )
       self._update_detection(target_unstable, now)
+    elif requested_active:
+      self._hold_detection_for_stale_target(now)
     else:
       self._reset_detection("disengaged")
       self._reset_motion()
 
-    active = requested_active and self.last_tracking_status == "override"
+    active = requested_active and input_fresh and self.last_tracking_status == "override"
     self.last_active = active
     self.last_raw_nudge_angle_deg = (
       compute_nudge_angle_deg(
@@ -443,6 +517,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
           "pedal_fallback=True",
           f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
           f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
+          f"assist_stale_grace={TORQUE_SIM_ASSIST_STALE_GRACE_S:.2f}s",
           f"steer_assist_inner_deadband={DEFAULT_INNER_DEADBAND_DEG:.1f}deg",
           f"steer_assist_full_error={DEFAULT_FULL_ASSIST_ERROR_DEG:.1f}deg",
           f"steer_assist_tracking_error={STEER_ASSIST_TRACKING_ERROR_DEG:.1f}deg",
@@ -488,6 +563,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
         assist_target_source.last_target_angle_deg,
         haptic_target_angle_deg,
         base_target_log_mono_time=assist_target_source.last_target_log_mono_time,
+        input_fresh=assist_target_source.last_target_fresh,
         now=now,
       )
 
@@ -503,6 +579,9 @@ def _run(g29_sock, steer_assist_sock) -> None:
           {
             "steer_assist": {
               "requested_active": target_steering is not None,
+              "target_source": assist_target_name,
+              "target_fresh": assist_target_source.last_target_fresh,
+              "stale_grace_s": TORQUE_SIM_ASSIST_STALE_GRACE_S,
               "active": steer_assist_publisher.last_active,
               "tracking_status": steer_assist_publisher.last_tracking_status,
               "tracking_error_deg": STEER_ASSIST_TRACKING_ERROR_DEG,
@@ -515,6 +594,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
               "target_step_deg": steer_assist_publisher.last_target_step_deg,
               "target_rate_deg_s": steer_assist_publisher.last_target_rate_deg_s,
+              "target_interval_s": steer_assist_publisher.last_target_interval_s,
               "haptic_target_rate_deg_s": steer_assist_publisher.last_haptic_target_rate_deg_s,
               "wheel_velocity_deg_s": steer_assist_publisher.last_wheel_velocity_deg_s,
               "relative_velocity_deg_s": steer_assist_publisher.last_relative_velocity_deg_s,

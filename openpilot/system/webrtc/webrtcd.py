@@ -164,6 +164,18 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         buffered_amounts.append(0)
     return max(buffered_amounts)
 
+  def feedback_metrics(self) -> dict[str, Any]:
+    return {
+      "sent": dict(self.sent),
+      "skipped": dict(self.skipped),
+      "sent_bytes": dict(self.sent_bytes),
+      "pending": dict(self.pending_send),
+      "buffered_amount": self.buffered_amount(),
+      "buffered_limit": self.max_buffered_amount,
+      "max_observed_buffered_amount": self.max_observed_buffered_amount,
+      "channels": len(self.channels),
+    }
+
   def update(self):
     # this is blocking in async context...
     self.sm.update(0)
@@ -345,11 +357,18 @@ class LivestreamBitrateController(AsyncTaskRunner):
 
 
 class WebRTCStatsLogger(AsyncTaskRunner):
-  def __init__(self, peer_connection: Any, interval: float, enabled: bool = True):
+  def __init__(
+    self,
+    peer_connection: Any,
+    interval: float,
+    enabled: bool = True,
+    feedback_bridge: CerealOutgoingMessageProxy | None = None,
+  ):
     super().__init__()
     self.pc = peer_connection
     self.interval = interval
     self._enabled = enabled
+    self.feedback_bridge = feedback_bridge
     self.last_outbound: dict[str, dict[str, int]] = {}
     self.stats_file = os.getenv("WEBRTCD_STATS_FILE") or default_metrics_jsonl_path("ugv_webrtcd")
     self.latest_file = os.getenv("WEBRTCD_STATS_LATEST_FILE") or default_latest_json_path("ugv_webrtcd")
@@ -410,6 +429,8 @@ class WebRTCStatsLogger(AsyncTaskRunner):
 
       if any(summary.values()):
         payload: dict[str, Any] = {"webrtcd_stats": summary}
+        if self.feedback_bridge is not None:
+          payload["feedback_stats"] = self.feedback_bridge.feedback_metrics()
         modem_stats = read_modem_stats(self.modem_file)
         if modem_stats is not None:
           payload["modem_stats"] = modem_stats
@@ -465,6 +486,7 @@ class StreamSession:
         self.stream.peer_connection,
         float(os.getenv("WEBRTCD_STATS_INTERVAL", "2.0")),
         self.enabled,
+        self.outgoing_bridge,
       )
 
     self.run_task: asyncio.Task | None = None

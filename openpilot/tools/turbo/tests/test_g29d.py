@@ -259,6 +259,7 @@ def test_assist_target_source_uses_fresh_engaged_controlsstate_target():
   assert source.last_selfdrive_age_s == pytest.approx(0.1)
   assert source.last_target_angle_deg == pytest.approx(45.0)
   assert source.last_target_log_mono_time == 10_000_000_000
+  assert source.last_target_fresh
   assert source.last_applied_angle_deg == pytest.approx(12.0)
   assert sm.update_count == 1
 
@@ -352,6 +353,59 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
 
   assert target is None
   assert name == "selfdriveState_stale"
+
+
+def test_assist_target_source_holds_last_target_during_brief_feedback_staleness():
+  sm = FakeSubMaster(
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    controlsstate_log_mono_time=10_000_000_000,
+    steering_angle_desired_deg=45.0,
+    selfdrive_seen=True,
+    selfdrive_valid=True,
+    selfdrive_recv_time=10.0,
+    selfdrive_enabled=True,
+  )
+  source = AssistTargetSource(sm=sm, stale_timeout_s=0.25, stale_grace_s=0.15)
+  source.update(now=10.1)
+
+  target, name = source.update(now=10.3)
+
+  assert target == pytest.approx(-0.25)
+  assert name == "feedback_stale_hold"
+  assert source.last_target_angle_deg == pytest.approx(45.0)
+  assert source.last_target_log_mono_time == 10_000_000_000
+  assert not source.last_target_fresh
+
+  target, name = source.update(now=10.41)
+
+  assert target is None
+  assert name == "selfdriveState_stale"
+  assert source.last_target_angle_deg is None
+
+
+def test_assist_target_source_clears_held_target_on_fresh_disengagement():
+  sm = FakeSubMaster(
+    controlsstate_seen=True,
+    controlsstate_valid=True,
+    controlsstate_recv_time=10.0,
+    steering_angle_desired_deg=45.0,
+    selfdrive_seen=True,
+    selfdrive_valid=True,
+    selfdrive_recv_time=10.0,
+    selfdrive_enabled=True,
+  )
+  source = AssistTargetSource(sm=sm, stale_timeout_s=0.25, stale_grace_s=0.15)
+  source.update(now=10.1)
+  sm.data["selfdriveState"].enabled = False
+  sm.recv_time["selfdriveState"] = 10.2
+
+  target, name = source.update(now=10.21)
+
+  assert target is None
+  assert name == "disengaged"
+  assert source.last_target_angle_deg is None
 
 
 def test_steer_assist_nudge_publisher_arms_after_measured_tracking():
@@ -507,6 +561,68 @@ def test_steer_assist_nudge_publisher_preserves_override_across_model_jump():
   assert publisher.last_tracking_status == "tracking"
   assert not msg.turboSteerAssist.active
   assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+
+def test_steer_assist_nudge_publisher_uses_source_timestamp_for_target_rate():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, max_target_step_deg=15.0, max_target_rate_deg_s=300.0)
+
+  publisher.update(
+    {"steering": 0.0},
+    0.0,
+    0.0,
+    0.0,
+    base_target_log_mono_time=10_000_000_000,
+    now=10.0,
+  )
+  publisher.update(
+    {"steering": 0.0},
+    _steering_angle_to_g29_target(8.78),
+    8.78,
+    4.32,
+    base_target_log_mono_time=10_050_000_000,
+    now=10.024,
+  )
+
+  assert publisher.last_target_interval_s == pytest.approx(0.05)
+  assert publisher.last_target_rate_deg_s == pytest.approx(175.6)
+  assert publisher.last_tracking_status != "target_unstable"
+
+
+def test_steer_assist_nudge_publisher_preserves_tracking_but_publishes_inactive_when_stale():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, candidate_duration_s=0.08)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  assert publisher.last_tracking_status == "tracking"
+
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, input_fresh=False, now=10.02)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "tracking"
+  assert not msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+  publisher.update({"steering": -7.0 / 180.0}, 0.0, 0.0, 0.0, now=10.04)
+  assert publisher.last_tracking_status == "candidate"
+
+
+def test_steer_assist_nudge_publisher_preserves_override_but_publishes_inactive_when_stale():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, candidate_duration_s=0.08)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  publisher.update({"steering": -7.0 / 180.0}, 0.0, 0.0, 0.0, now=10.11)
+  assert publisher.last_tracking_status == "override"
+
+  publisher.update({"steering": -8.0 / 180.0}, 0.0, 0.0, 0.0, input_fresh=False, now=10.13)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert not msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+  publisher.update({"steering": -8.0 / 180.0}, 0.0, 0.0, 0.0, now=10.15)
+  assert messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
 def test_steer_assist_nudge_publisher_sends_every_update_with_target_lineage():

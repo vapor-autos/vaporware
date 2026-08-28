@@ -153,6 +153,28 @@ class TestStreamSession:
     assert proxy.maybe_log_stats(now=106.0, last_log=100.0) == 106.0
     log_stats.assert_called_once()
 
+  def test_outgoing_proxy_exposes_feedback_metrics(self, mocker):
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.bufferedAmount = 123
+    proxy = CerealOutgoingMessageProxy(["carState"], max_buffered_amount=456)
+    proxy.add_channel(channel)
+    proxy.sent["carState"] = 7
+    proxy.skipped["carState"] = 2
+    proxy.sent_bytes["carState"] = 1024
+    proxy.pending_send["carState"] = True
+    proxy.max_observed_buffered_amount = 321
+
+    assert proxy.feedback_metrics() == {
+      "sent": {"carState": 7},
+      "skipped": {"carState": 2},
+      "sent_bytes": {"carState": 1024},
+      "pending": {"carState": True},
+      "buffered_amount": 123,
+      "buffered_limit": 456,
+      "max_observed_buffered_amount": 321,
+      "channels": 1,
+    }
+
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
       {"type": "customReservedRawData0", "data": "test"}, # primitive
