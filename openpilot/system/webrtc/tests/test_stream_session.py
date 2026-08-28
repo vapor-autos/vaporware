@@ -12,6 +12,7 @@ import capnp
 from openpilot.cereal import messaging, log
 
 from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy
+from openpilot.tools.turbo.webrtc_controls import FeedbackPacketReassembler
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
 
@@ -159,6 +160,7 @@ class TestStreamSession:
     proxy = CerealOutgoingMessageProxy(["carState"], max_buffered_amount=456)
     proxy.add_channel(channel)
     proxy.sent["carState"] = 7
+    proxy.sent_packets["carState"] = 9
     proxy.skipped["carState"] = 2
     proxy.sent_bytes["carState"] = 1024
     proxy.pending_send["carState"] = True
@@ -166,6 +168,7 @@ class TestStreamSession:
 
     assert proxy.feedback_metrics() == {
       "sent": {"carState": 7},
+      "sent_packets": {"carState": 9},
       "skipped": {"carState": 2},
       "sent_bytes": {"carState": 1024},
       "pending": {"carState": True},
@@ -174,6 +177,32 @@ class TestStreamSession:
       "max_observed_buffered_amount": 321,
       "channels": 1,
     }
+
+  def test_outgoing_proxy_frames_feedback_channel_messages(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg])
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    proxy.add_channel(channel)
+    proxy.update()
+
+    reassembler = FeedbackPacketReassembler()
+    assembled = None
+    for call in channel.send.call_args_list:
+      assembled = reassembler.add(call.args[0]) or assembled
+    assert assembled is not None
+    assert json.loads(assembled)["data"]["vEgo"] == 1.5
+    assert proxy.sent_packets["carState"] == channel.send.call_count
 
   def test_incoming_proxy(self, mocker):
     tested_msgs = [

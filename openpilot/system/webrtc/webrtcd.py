@@ -29,7 +29,7 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
-from openpilot.tools.turbo.webrtc_controls import FEEDBACK_DATA_CHANNEL_LABEL, project_feedback_message
+from openpilot.tools.turbo.webrtc_controls import FEEDBACK_DATA_CHANNEL_LABEL, encode_feedback_packets, project_feedback_message
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -136,9 +136,11 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
     self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.sent_packets: dict[str, int] = dict.fromkeys(self.services, 0)
     self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
     self.max_observed_buffered_amount = 0
+    self.feedback_sequence = 0
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -168,6 +170,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
   def feedback_metrics(self) -> dict[str, Any]:
     return {
       "sent": dict(self.sent),
+      "sent_packets": dict(self.sent_packets),
       "skipped": dict(self.skipped),
       "sent_bytes": dict(self.sent_bytes),
       "pending": dict(self.pending_send),
@@ -199,12 +202,22 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         self.skipped[service] += 1
         continue
 
-      for channel in self.channels:
+      feedback_channels = [channel for channel in self.channels if channel.label == FEEDBACK_DATA_CHANNEL_LABEL]
+      legacy_channels = [channel for channel in self.channels if channel.label != FEEDBACK_DATA_CHANNEL_LABEL]
+      feedback_packets: list[bytes] = []
+      if feedback_channels:
+        self.feedback_sequence = (self.feedback_sequence + 1) & 0xFFFFFFFF
+        feedback_packets = encode_feedback_packets(encoded_msg, self.feedback_sequence)
+        for channel in feedback_channels:
+          for packet in feedback_packets:
+            channel.send(packet)
+      for channel in legacy_channels:
         channel.send(encoded_msg)
       self.last_send_time[service] = now
       self.pending_send[service] = False
       self.sent[service] += 1
-      self.sent_bytes[service] += len(encoded_msg)
+      self.sent_packets[service] += len(feedback_packets) if feedback_packets else 1
+      self.sent_bytes[service] += sum(map(len, feedback_packets)) if feedback_packets else len(encoded_msg)
 
   def log_stats(self):
     sent_counts = " ".join(f"{service}={count}" for service, count in self.sent.items())

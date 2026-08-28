@@ -1,7 +1,9 @@
 import asyncio
 import json
+import struct
 import time
 from typing import Any
+import zlib
 
 import capnp
 
@@ -9,6 +11,11 @@ from openpilot.cereal import messaging
 
 
 FEEDBACK_DATA_CHANNEL_LABEL = "feedback"
+FEEDBACK_PACKET_MAGIC = b"TFB1"
+FEEDBACK_PACKET_PAYLOAD_SIZE = 1000
+FEEDBACK_REASSEMBLY_TIMEOUT_S = 2.0
+FEEDBACK_MAX_PENDING_MESSAGES = 64
+_FEEDBACK_PACKET_HEADER = struct.Struct("!4sIHH")
 
 
 def create_feedback_data_channel(peer_connection, message_handler):
@@ -19,6 +26,60 @@ def create_feedback_data_channel(peer_connection, message_handler):
   )
   channel.on("message", message_handler)
   return channel
+
+
+def encode_feedback_packets(payload: bytes, message_id: int) -> list[bytes]:
+  compressed = zlib.compress(payload, level=1)
+  chunks = [
+    compressed[offset:offset + FEEDBACK_PACKET_PAYLOAD_SIZE]
+    for offset in range(0, len(compressed), FEEDBACK_PACKET_PAYLOAD_SIZE)
+  ] or [b""]
+  return [
+    _FEEDBACK_PACKET_HEADER.pack(FEEDBACK_PACKET_MAGIC, message_id & 0xFFFFFFFF, index, len(chunks)) + chunk
+    for index, chunk in enumerate(chunks)
+  ]
+
+
+class FeedbackPacketReassembler:
+  def __init__(
+    self,
+    timeout_s: float = FEEDBACK_REASSEMBLY_TIMEOUT_S,
+    max_pending_messages: int = FEEDBACK_MAX_PENDING_MESSAGES,
+  ):
+    self.timeout_s = timeout_s
+    self.max_pending_messages = max_pending_messages
+    self.pending: dict[int, tuple[float, int, dict[int, bytes]]] = {}
+
+  def add(self, packet: bytes, now: float | None = None) -> bytes | None:
+    if len(packet) < _FEEDBACK_PACKET_HEADER.size:
+      raise ValueError("feedback packet is shorter than its header")
+
+    magic, message_id, index, count = _FEEDBACK_PACKET_HEADER.unpack_from(packet)
+    if magic != FEEDBACK_PACKET_MAGIC or count == 0 or index >= count:
+      raise ValueError("invalid feedback packet header")
+
+    now = time.monotonic() if now is None else now
+    self._expire(now)
+    pending = self.pending.get(message_id)
+    if pending is None or pending[1] != count:
+      if len(self.pending) >= self.max_pending_messages:
+        oldest_id = min(self.pending, key=lambda pending_id: self.pending[pending_id][0])
+        del self.pending[oldest_id]
+      pending = (now, count, {})
+      self.pending[message_id] = pending
+
+    pending[2][index] = packet[_FEEDBACK_PACKET_HEADER.size:]
+    if len(pending[2]) != count:
+      return None
+
+    compressed = b"".join(pending[2][chunk_index] for chunk_index in range(count))
+    del self.pending[message_id]
+    return zlib.decompress(compressed)
+
+  def _expire(self, now: float) -> None:
+    expired = [message_id for message_id, pending in self.pending.items() if now - pending[0] > self.timeout_s]
+    for message_id in expired:
+      del self.pending[message_id]
 
 
 UI_SMOKE_FEEDBACK_SERVICES = [
@@ -150,8 +211,19 @@ class CerealDataChannelReceiver:
     self.pm = messaging.PubMaster(self.services) if pm is None else pm
     self.received: dict[str, int] = dict.fromkeys(services, 0)
     self.ignored = 0
+    self.reassembler = FeedbackPacketReassembler()
 
   def receive(self, message: bytes | str) -> bool:
+    if isinstance(message, bytes) and message.startswith(FEEDBACK_PACKET_MAGIC):
+      try:
+        assembled = self.reassembler.add(message)
+      except (ValueError, zlib.error):
+        self.ignored += 1
+        return False
+      if assembled is None:
+        return True
+      message = assembled
+
     payload = json.loads(message)
     if not isinstance(payload, dict):
       self.ignored += 1

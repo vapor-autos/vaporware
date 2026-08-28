@@ -1,10 +1,13 @@
 import json
+import random
 
 import pytest
 
 from openpilot.tools.turbo.webrtc_controls import (
   CerealDataChannelReceiver,
+  FeedbackPacketReassembler,
   create_feedback_data_channel,
+  encode_feedback_packets,
   expand_feedback_services,
   model_v2_ui_projection,
   parse_control_services,
@@ -31,6 +34,18 @@ def test_create_feedback_data_channel_is_unordered_and_does_not_retransmit(mocke
   assert create_feedback_data_channel(peer_connection, message_handler) is channel
   peer_connection.createDataChannel.assert_called_once_with("feedback", ordered=False, maxRetransmits=0)
   channel.on.assert_called_once_with("message", message_handler)
+
+
+def test_feedback_packets_are_small_and_reassemble_out_of_order():
+  payload = random.Random(0).randbytes(5000)
+  packets = encode_feedback_packets(payload, message_id=123)
+  reassembler = FeedbackPacketReassembler()
+
+  assert len(packets) > 1
+  assert max(map(len, packets)) <= 1012
+  for packet in reversed(packets[1:]):
+    assert reassembler.add(packet, now=10.0) is None
+  assert reassembler.add(packets[0], now=10.0) == payload
 
 
 def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
@@ -143,6 +158,24 @@ def test_cereal_data_channel_receiver_publishes_allowlisted_car_state():
   assert msg.carState.vEgoRaw == 4.5
   assert not msg.carState.standstill
   assert receiver.received["carState"] == 1
+
+
+def test_cereal_data_channel_receiver_reassembles_framed_feedback():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["carState"], pm=pm)
+  payload = json.dumps({
+    "type": "carState",
+    "logMonoTime": 123,
+    "valid": True,
+    "data": {"vEgo": 4.25},
+  }).encode()
+  packets = encode_feedback_packets(payload, message_id=123)
+
+  for packet in reversed(packets):
+    assert receiver.receive(packet)
+
+  assert len(pm.sent) == 1
+  assert pm.sent[0][1].carState.vEgo == 4.25
 
 
 def test_cereal_data_channel_receiver_publishes_turbo_steer_assist():
