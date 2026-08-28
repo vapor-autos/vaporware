@@ -8,6 +8,19 @@ import capnp
 from openpilot.cereal import messaging
 
 
+FEEDBACK_DATA_CHANNEL_LABEL = "feedback"
+
+
+def create_feedback_data_channel(peer_connection, message_handler):
+  channel = peer_connection.createDataChannel(
+    FEEDBACK_DATA_CHANNEL_LABEL,
+    ordered=False,
+    maxRetransmits=0,
+  )
+  channel.on("message", message_handler)
+  return channel
+
+
 UI_SMOKE_FEEDBACK_SERVICES = [
   "deviceState",
   "pandaStates",

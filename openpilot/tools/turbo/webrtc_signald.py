@@ -10,7 +10,13 @@ import aiortc
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
-from openpilot.tools.turbo.webrtc_controls import CerealDataChannelReceiver, CerealDataChannelSender, expand_feedback_services, parse_control_services
+from openpilot.tools.turbo.webrtc_controls import (
+  CerealDataChannelReceiver,
+  CerealDataChannelSender,
+  create_feedback_data_channel,
+  expand_feedback_services,
+  parse_control_services,
+)
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
 
@@ -67,7 +73,11 @@ class SignalingSession:
       builder.add_messaging()
     self.stream = builder.stream()
     self.feedback_receiver = CerealDataChannelReceiver(self.feedback_services) if self.feedback_services else None
+    self.feedback_channel = None
     if self.feedback_receiver is not None:
+      self.feedback_channel = create_feedback_data_channel(self.stream.peer_connection, self.feedback_receiver.receive)
+      # Retain the legacy handler so an older UGV can still send feedback on the
+      # default reliable channel during a rolling update.
       self.stream.set_message_handler(self.feedback_receiver.receive)
     self.task = asyncio.create_task(self.run())
 

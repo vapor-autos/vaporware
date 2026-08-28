@@ -29,7 +29,7 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
-from openpilot.tools.turbo.webrtc_controls import project_feedback_message
+from openpilot.tools.turbo.webrtc_controls import FEEDBACK_DATA_CHANNEL_LABEL, project_feedback_message
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -97,6 +97,7 @@ FEEDBACK_SERVICE_RATES_HZ = {
 FEEDBACK_DEFAULT_RATE_HZ = 10.0
 FEEDBACK_MAX_BUFFERED_AMOUNT = 16 * 1024
 FEEDBACK_LOG_INTERVAL = 5.0
+FEEDBACK_CHANNEL_WAIT_TIMEOUT = 2.0
 FEEDBACK_SERVICE_PRIORITIES = {
   "carState": 0,
   "selfdriveState": 1,
@@ -468,6 +469,8 @@ class StreamSession:
     self.incoming_bridge: CerealIncomingMessageProxy | None = None
     self.incoming_bridge_services = body.bridge_services_in
     self.outgoing_bridge: CerealOutgoingMessageProxy | None = None
+    self.feedback_channel = None
+    self.feedback_channel_ready = asyncio.Event()
     self.bitrate_controller: LivestreamBitrateController | None = None
     self.stats_logger: WebRTCStatsLogger | None = None
     if len(body.bridge_services_in) > 0:
@@ -480,6 +483,16 @@ class StreamSession:
         max_buffered_amount=int(os.getenv("TURBO_WEBRTCD_FEEDBACK_MAX_BUFFERED_AMOUNT", str(FEEDBACK_MAX_BUFFERED_AMOUNT))),
         log_stats=webrtc_stats_enabled,
       )
+
+      @self.stream.peer_connection.on("datachannel")
+      def on_datachannel(channel):
+        if channel.label != FEEDBACK_DATA_CHANNEL_LABEL:
+          return
+        self.feedback_channel = channel
+        if channel.readyState == "open":
+          self.feedback_channel_ready.set()
+        else:
+          channel.on("open", self.feedback_channel_ready.set)
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
     if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
       self.stats_logger = WebRTCStatsLogger(
@@ -560,7 +573,14 @@ class StreamSession:
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
         if self.outgoing_bridge is not None:
-          channel = self.stream.get_messaging_channel()
+          try:
+            await asyncio.wait_for(self.feedback_channel_ready.wait(), timeout=FEEDBACK_CHANNEL_WAIT_TIMEOUT)
+          except TimeoutError:
+            channel = self.stream.get_messaging_channel()
+            self.logger.warning("Feedback channel unavailable; using default reliable data channel")
+          else:
+            channel = self.feedback_channel
+            self.logger.info("Using unordered no-retransmit feedback data channel")
           self.outgoing_bridge.add_channel(channel)
           self.outgoing_bridge.start()
       self.bitrate_controller.start()

@@ -4,6 +4,7 @@ import pytest
 
 from openpilot.tools.turbo.webrtc_controls import (
   CerealDataChannelReceiver,
+  create_feedback_data_channel,
   expand_feedback_services,
   model_v2_ui_projection,
   parse_control_services,
@@ -20,6 +21,16 @@ class FakePubMaster:
 
   def send(self, service, msg):
     self.sent.append((service, msg))
+
+
+def test_create_feedback_data_channel_is_unordered_and_does_not_retransmit(mocker):
+  peer_connection = mocker.Mock()
+  channel = peer_connection.createDataChannel.return_value
+  message_handler = mocker.Mock()
+
+  assert create_feedback_data_channel(peer_connection, message_handler) is channel
+  peer_connection.createDataChannel.assert_called_once_with("feedback", ordered=False, maxRetransmits=0)
+  channel.on.assert_called_once_with("message", message_handler)
 
 
 def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
