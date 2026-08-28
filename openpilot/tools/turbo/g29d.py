@@ -20,7 +20,7 @@ TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
 TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S = 8.0
 TORQUE_SIM_CARSTATE_STALE_S = 0.25
 TORQUE_SIM_ASSIST_STALE_S = 0.25
-STEER_ASSIST_TRACKING_ERROR_DEG = 3.0
+STEER_ASSIST_TRACKING_ERROR_DEG = 5.0
 STEER_ASSIST_TRACKING_DURATION_S = 0.3
 STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S = 10.0
 STEER_ASSIST_CANDIDATE_DURATION_S = 0.08
@@ -293,7 +293,7 @@ class SteerAssistNudgePublisher:
     target_rate_deg_s = self.last_haptic_target_rate_deg_s
     wheel_velocity_deg_s = self.last_wheel_velocity_deg_s
 
-    if target_unstable:
+    if target_unstable and self.last_tracking_status != "override":
       self._reset_detection("target_unstable")
       return
 

@@ -65,9 +65,10 @@ def test_g29_steering_to_angle_deg_uses_teleop_sign():
 
 def test_compute_nudge_angle_deg_uses_soft_deadband():
   assert compute_nudge_angle_deg(wheel_steering=-94.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.0)
-  assert compute_nudge_angle_deg(wheel_steering=-95.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.78125)
-  assert compute_nudge_angle_deg(wheel_steering=-96.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(3.0)
-  assert compute_nudge_angle_deg(wheel_steering=-98.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(8.0)
+  assert compute_nudge_angle_deg(wheel_steering=-95.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.0)
+  assert compute_nudge_angle_deg(wheel_steering=-96.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.624)
+  assert compute_nudge_angle_deg(wheel_steering=-97.5 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(3.75)
+  assert compute_nudge_angle_deg(wheel_steering=-100.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(10.0)
   assert compute_nudge_angle_deg(wheel_steering=-80.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(-10.0)
 
 
