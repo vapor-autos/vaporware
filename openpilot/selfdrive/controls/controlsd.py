@@ -156,7 +156,7 @@ class Controls:
       actuators.curvature = float(lateral_output)
     else:
       model_angle_deg = float(lateral_output)
-      assist_nudge_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive)
+      assist_nudge_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
       final_angle_deg = clip_steering_angle_deg(model_angle_deg + assist_nudge_deg) if self.turbo_steer_assist_apply else model_angle_deg
       actuators.steeringAngleDeg = final_angle_deg
       self.log_turbo_steer_assist(model_angle_deg, assist_nudge_deg, final_angle_deg, assist_status)
@@ -181,11 +181,18 @@ class Controls:
       return
     age = self.turbo_steer_assist_source.last_age_s
     age_text = "none" if age is None else f"{age:.3f}s"
+    context_age = self.turbo_steer_assist_source.last_context_age_s
+    context_age_text = "none" if context_age is None else f"{context_age:.3f}s"
+    target_delta = self.turbo_steer_assist_source.last_target_delta_deg
+    target_delta_text = "none" if target_delta is None else f"{target_delta:.2f}deg"
     cloudlog.info(
-      "turbo steer assist apply=%s status=%s age=%s model_angle=%.2fdeg nudge=%.2fdeg final_angle=%.2fdeg",
+      "turbo steer assist apply=%s status=%s age=%s context_age=%s target_delta=%s sequence=%d model_angle=%.2fdeg nudge=%.2fdeg final_angle=%.2fdeg",
       self.turbo_steer_assist_apply,
       status,
       age_text,
+      context_age_text,
+      target_delta_text,
+      self.turbo_steer_assist_source.last_sequence,
       model_angle_deg,
       nudge_angle_deg,
       final_angle_deg,

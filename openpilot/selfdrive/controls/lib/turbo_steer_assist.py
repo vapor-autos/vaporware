@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 
 
@@ -7,6 +8,8 @@ STEERING_TARGET_MAX_ANGLE_DEG = 180.0
 DEFAULT_INNER_DEADBAND_DEG = 4.0
 DEFAULT_FULL_ASSIST_ERROR_DEG = 8.0
 DEFAULT_STALE_TIMEOUT_S = 0.25
+DEFAULT_CONTEXT_TIMEOUT_S = 0.35
+DEFAULT_TARGET_MISMATCH_DEG = 15.0
 
 
 def clip(value: float, lo: float, hi: float) -> float:
@@ -57,17 +60,31 @@ class TurboSteerAssistSource:
     self,
     sm,
     stale_timeout_s: float = DEFAULT_STALE_TIMEOUT_S,
+    context_timeout_s: float = DEFAULT_CONTEXT_TIMEOUT_S,
+    target_mismatch_deg: float = DEFAULT_TARGET_MISMATCH_DEG,
   ):
     self.sm = sm
     self.stale_timeout_s = stale_timeout_s
+    self.context_timeout_s = context_timeout_s
+    self.target_mismatch_deg = target_mismatch_deg
     self.last_age_s: float | None = None
+    self.last_context_age_s: float | None = None
+    self.last_target_delta_deg: float | None = None
+    self.last_sequence = 0
+    self.last_base_target_log_mono_time = 0
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
     self.last_status = "unseen"
+    self._current_key: tuple[int, int] | None = None
+    self._current_key_status = "unseen"
+    self._last_accepted_base_target_log_mono_time = 0
+    self._last_accepted_sequence = 0
 
-  def update(self, lat_active: bool, now: float | None = None) -> tuple[float, str]:
+  def update(self, lat_active: bool, model_angle_deg: float, now: float | None = None) -> tuple[float, str]:
     now = time.monotonic() if now is None else now
     self.last_age_s = self._age(now)
+    self.last_context_age_s = None
+    self.last_target_delta_deg = None
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
@@ -89,7 +106,46 @@ class TurboSteerAssistSource:
       self.last_status = "inactive"
       return 0.0, self.last_status
 
+    self.last_sequence = int(assist.sequence)
+    self.last_base_target_log_mono_time = int(assist.baseTargetLogMonoTime)
+    key = (self.last_base_target_log_mono_time, self.last_sequence)
+    if key != self._current_key:
+      self._current_key = key
+      if self.last_base_target_log_mono_time == 0 or self.last_sequence == 0:
+        self._current_key_status = "missing_target_context"
+      elif self.last_base_target_log_mono_time < self._last_accepted_base_target_log_mono_time or (
+        self.last_base_target_log_mono_time == self._last_accepted_base_target_log_mono_time and self.last_sequence <= self._last_accepted_sequence
+      ):
+        self._current_key_status = "out_of_order"
+      else:
+        self._current_key_status = "accepted"
+        self._last_accepted_base_target_log_mono_time = self.last_base_target_log_mono_time
+        self._last_accepted_sequence = self.last_sequence
+
+    if self._current_key_status != "accepted":
+      self.last_status = self._current_key_status
+      return 0.0, self.last_status
+
+    self.last_context_age_s = now - self.last_base_target_log_mono_time / 1e9
+    if self.last_context_age_s < 0.0:
+      self.last_status = "future_target_context"
+      return 0.0, self.last_status
+    if self.last_context_age_s > self.context_timeout_s:
+      self.last_status = "stale_target_context"
+      return 0.0, self.last_status
+
+    target_angle_deg = float(assist.targetSteeringAngleDeg)
+    self.last_target_delta_deg = float(model_angle_deg) - target_angle_deg
+    if not math.isfinite(self.last_target_delta_deg) or abs(self.last_target_delta_deg) > self.target_mismatch_deg:
+      self.last_status = "target_mismatch"
+      return 0.0, self.last_status
+
     self.last_raw_nudge_angle_deg = float(assist.nudgeAngleDeg)
+    if not math.isfinite(self.last_raw_nudge_angle_deg):
+      self.last_raw_nudge_angle_deg = 0.0
+      self.last_status = "invalid_nudge"
+      return 0.0, self.last_status
+
     self.last_nudge_angle_deg = self.last_raw_nudge_angle_deg
     self.last_status = "active"
     return self.last_nudge_angle_deg, self.last_status

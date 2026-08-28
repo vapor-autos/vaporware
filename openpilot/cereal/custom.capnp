@@ -25,6 +25,8 @@ struct TurboSteerAssist @0xda96579883444c35 {
   wheelSteering @2 :Float32;
   targetSteeringAngleDeg @3 :Float32;
   targetSteering @4 :Float32;
+  sequence @5 :UInt32;
+  baseTargetLogMonoTime @6 :UInt64;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {
