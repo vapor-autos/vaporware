@@ -11,7 +11,7 @@ from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
 from openpilot.cereal import messaging, log
 
-from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy
+from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, UdpFeedbackChannel
 from openpilot.tools.turbo.webrtc_controls import FeedbackPacketReassembler
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
@@ -23,6 +23,19 @@ class TestStreamSession:
   def teardown_method(self):
     self.loop.stop()
     self.loop.close()
+
+  def test_udp_feedback_channel_sends_connected_datagrams(self, mocker):
+    udp_socket = mocker.patch("openpilot.system.webrtc.webrtcd.socket.socket").return_value
+    channel = UdpFeedbackChannel(("100.99.187.99", 8444))
+
+    udp_socket.connect.assert_called_once_with(("100.99.187.99", 8444))
+    channel.send(b"feedback")
+    udp_socket.send.assert_called_once_with(b"feedback")
+    assert channel.label == "feedback"
+    assert channel.bufferedAmount == 0
+
+    channel.close()
+    udp_socket.close.assert_called_once()
 
   def test_outgoing_proxy(self, mocker):
     test_msg = log.Event.new_message()

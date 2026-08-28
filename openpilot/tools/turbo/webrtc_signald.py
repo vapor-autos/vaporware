@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from collections.abc import Callable
 from dataclasses import asdict
 import os
 import uuid
@@ -19,6 +20,9 @@ from openpilot.tools.turbo.webrtc_controls import (
 )
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
+
+
+FEEDBACK_UDP_PORT = 8444
 
 
 class GcsAnswerProvider:
@@ -137,6 +141,8 @@ class SignalingState:
   def __init__(self, args: argparse.Namespace):
     self.args = args
     self.cameras = parse_cameras(args.cameras)
+    self.feedback_udp_host = os.getenv("TURBO_GCS_FEEDBACK_UDP_HOST", "")
+    self.feedback_udp_port = int(os.getenv("TURBO_GCS_FEEDBACK_UDP_PORT", str(FEEDBACK_UDP_PORT)))
     self.session: SignalingSession | None = None
     self.lock = asyncio.Lock()
 
@@ -152,6 +158,29 @@ class SignalingState:
         await self.session.stop()
       self.session = SignalingSession(self.args, self.cameras)
       return self.session
+
+
+class FeedbackDatagramProtocol(asyncio.DatagramProtocol):
+  def __init__(self, receiver: Callable[[], CerealDataChannelReceiver | None]):
+    self.receiver = receiver
+    self.received_packets = 0
+    self.received_bytes = 0
+    self.ignored_packets = 0
+
+  def datagram_received(self, data: bytes, addr) -> None:
+    receiver = self.receiver()
+    if receiver is None:
+      self.ignored_packets += 1
+      return
+    try:
+      accepted = receiver.receive(data)
+    except (TypeError, ValueError):
+      accepted = False
+    if accepted:
+      self.received_packets += 1
+      self.received_bytes += len(data)
+    else:
+      self.ignored_packets += 1
 
 
 async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -180,6 +209,9 @@ async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
   payload = asdict(session.provider.offer_body)
   payload["session_id"] = session.session_id
+  if state.feedback_udp_host:
+    payload["feedback_udp_host"] = state.feedback_udp_host
+    payload["feedback_udp_port"] = state.feedback_udp_port
   return aiohttp.web.json_response(payload)
 
 
@@ -215,7 +247,8 @@ async def handle_reset(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
 async def run(args: argparse.Namespace) -> None:
   app = aiohttp.web.Application()
-  app["state"] = SignalingState(args)
+  state = SignalingState(args)
+  app["state"] = state
   app.add_routes([
     aiohttp.web.get("/health", handle_health),
     aiohttp.web.get("/offer", handle_offer),
@@ -229,10 +262,25 @@ async def run(args: argparse.Namespace) -> None:
   await site.start()
   print(f"turbo_webrtc_signald listening on {args.host}:{args.port} cameras={args.cameras}", flush=True)
 
+  feedback_udp_transport = None
+  if state.feedback_udp_host:
+    loop = asyncio.get_running_loop()
+    feedback_udp_transport, _ = await loop.create_datagram_endpoint(
+      lambda: FeedbackDatagramProtocol(
+        lambda: state.session.feedback_receiver if state.session is not None else None,
+      ),
+      local_addr=(state.feedback_udp_host, state.feedback_udp_port),
+    )
+    print(
+      f"turbo feedback UDP listening on {state.feedback_udp_host}:{state.feedback_udp_port}",
+      flush=True,
+    )
+
   try:
     await asyncio.Event().wait()
   finally:
-    state: SignalingState = app["state"]
+    if feedback_udp_transport is not None:
+      feedback_udp_transport.close()
     if state.session is not None:
       await state.session.stop()
     await runner.cleanup()

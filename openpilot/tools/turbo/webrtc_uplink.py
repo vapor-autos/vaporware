@@ -10,9 +10,15 @@ from openpilot.system.webrtc.webrtcd import StreamSession
 
 
 class Offer:
-  def __init__(self, body: StreamRequestBody, session_id: str | None):
+  def __init__(
+    self,
+    body: StreamRequestBody,
+    session_id: str | None,
+    feedback_udp_endpoint: tuple[str, int] | None = None,
+  ):
     self.body = body
     self.session_id = session_id
+    self.feedback_udp_endpoint = feedback_udp_endpoint
 
 
 class AnswerRejected(Exception):
@@ -37,7 +43,10 @@ async def fetch_offer(base_url: str, timeout: float) -> Offer:
 
   payload = await asyncio.to_thread(get_offer)
   session_id = payload.pop("session_id", None)
-  return Offer(StreamRequestBody(**payload), session_id)
+  feedback_udp_host = payload.pop("feedback_udp_host", "")
+  feedback_udp_port = int(payload.pop("feedback_udp_port", 0))
+  feedback_udp_endpoint = (feedback_udp_host, feedback_udp_port) if feedback_udp_host and feedback_udp_port > 0 else None
+  return Offer(StreamRequestBody(**payload), session_id, feedback_udp_endpoint)
 
 
 async def post_answer(base_url: str, session_id: str | None, answer_sdp: str, answer_type: str, timeout: float) -> None:
@@ -58,7 +67,7 @@ async def run_once(args: argparse.Namespace) -> None:
   body = offer.body
   print(f"received offer session={offer.session_id or 'unknown'} cameras={','.join(body.cameras or [body.init_camera])}", flush=True)
 
-  session = StreamSession(body)
+  session = StreamSession(body, feedback_udp_endpoint=offer.feedback_udp_endpoint)
   try:
     answer = await session.get_answer()
     await post_answer(args.signaling_url, offer.session_id, answer.sdp, answer.type, args.http_timeout)

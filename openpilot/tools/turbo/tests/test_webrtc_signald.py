@@ -1,6 +1,6 @@
 import asyncio
 
-from openpilot.tools.turbo.webrtc_signald import GcsAnswerProvider
+from openpilot.tools.turbo.webrtc_signald import FeedbackDatagramProtocol, GcsAnswerProvider
 from teleoprtc import StreamingOffer
 
 
@@ -31,3 +31,25 @@ def test_gcs_answer_provider_requests_feedback_services():
   assert offer_body.cameras == ["wideRoad"]
   assert offer_body.bridge_services_in == ["g29"]
   assert offer_body.bridge_services_out == ["carState"]
+
+
+def test_feedback_datagram_protocol_dispatches_to_current_receiver(mocker):
+  receiver = mocker.Mock()
+  receiver.receive.return_value = True
+  protocol = FeedbackDatagramProtocol(lambda: receiver)
+
+  protocol.datagram_received(b"feedback", ("100.67.29.97", 12345))
+
+  receiver.receive.assert_called_once_with(b"feedback")
+  assert protocol.received_packets == 1
+  assert protocol.received_bytes == 8
+  assert protocol.ignored_packets == 0
+
+
+def test_feedback_datagram_protocol_ignores_packets_without_session():
+  protocol = FeedbackDatagramProtocol(lambda: None)
+
+  protocol.datagram_received(b"feedback", ("100.67.29.97", 12345))
+
+  assert protocol.received_packets == 0
+  assert protocol.ignored_packets == 1

@@ -109,6 +109,22 @@ FEEDBACK_SERVICE_PRIORITIES = {
 }
 
 
+class UdpFeedbackChannel:
+  label = FEEDBACK_DATA_CHANNEL_LABEL
+  bufferedAmount = 0
+
+  def __init__(self, endpoint: tuple[str, int]):
+    self.endpoint = endpoint
+    self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.socket.connect(endpoint)
+
+  def send(self, packet: bytes) -> None:
+    self.socket.send(packet)
+
+  def close(self) -> None:
+    self.socket.close()
+
+
 class CerealOutgoingMessageProxy(AsyncTaskRunner):
   def __init__(
     self,
@@ -498,7 +514,12 @@ class WebRTCStatsLogger(AsyncTaskRunner):
 class StreamSession:
   shared_pub_master = DynamicPubMaster([])
 
-  def __init__(self, body: StreamRequestBody, debug_mode: bool = False):
+  def __init__(
+    self,
+    body: StreamRequestBody,
+    debug_mode: bool = False,
+    feedback_udp_endpoint: tuple[str, int] | None = None,
+  ):
     if debug_mode:
       from aiortc.mediastreams import VideoStreamTrack
     from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
@@ -528,6 +549,8 @@ class StreamSession:
     self.outgoing_bridge: CerealOutgoingMessageProxy | None = None
     self.feedback_channel = None
     self.feedback_channel_ready = asyncio.Event()
+    self.feedback_udp_endpoint = feedback_udp_endpoint
+    self.feedback_udp_channel: UdpFeedbackChannel | None = None
     self.bitrate_controller: LivestreamBitrateController | None = None
     self.stats_logger: WebRTCStatsLogger | None = None
     if len(body.bridge_services_in) > 0:
@@ -630,14 +653,19 @@ class StreamSession:
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
         if self.outgoing_bridge is not None:
-          try:
-            await asyncio.wait_for(self.feedback_channel_ready.wait(), timeout=FEEDBACK_CHANNEL_WAIT_TIMEOUT)
-          except TimeoutError:
-            channel = self.stream.get_messaging_channel()
-            self.logger.warning("Feedback channel unavailable; using default reliable data channel")
+          if self.feedback_udp_endpoint is not None:
+            self.feedback_udp_channel = UdpFeedbackChannel(self.feedback_udp_endpoint)
+            channel = self.feedback_udp_channel
+            self.logger.info("Using UDP feedback endpoint %s:%s", *self.feedback_udp_endpoint)
           else:
-            channel = self.feedback_channel
-            self.logger.info("Using unordered no-retransmit feedback data channel")
+            try:
+              await asyncio.wait_for(self.feedback_channel_ready.wait(), timeout=FEEDBACK_CHANNEL_WAIT_TIMEOUT)
+            except TimeoutError:
+              channel = self.stream.get_messaging_channel()
+              self.logger.warning("Feedback channel unavailable; using default reliable data channel")
+            else:
+              channel = self.feedback_channel
+              self.logger.info("Using unordered no-retransmit feedback data channel")
           self.outgoing_bridge.add_channel(channel)
           self.outgoing_bridge.start()
       self.bitrate_controller.start()
@@ -663,6 +691,9 @@ class StreamSession:
       await self.bitrate_controller.stop()
       if self.outgoing_bridge is not None:
         await self.outgoing_bridge.stop()
+      if self.feedback_udp_channel is not None:
+        self.feedback_udp_channel.close()
+        self.feedback_udp_channel = None
       for track in self.video_tracks.values():
         track.stop()
       self.video_tracks = {}
