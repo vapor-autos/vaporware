@@ -626,7 +626,7 @@ def test_steer_assist_nudge_publisher_disarms_on_model_jump_until_wheel_tracks()
   assert publisher.last_tracking_status == "tracking"
 
 
-def test_steer_assist_nudge_publisher_preserves_override_across_model_jump():
+def test_steer_assist_nudge_publisher_preserves_blended_target_across_model_jump():
   sock = FakeSocket()
   publisher = make_steer_assist_publisher(
     sock,
@@ -650,7 +650,10 @@ def test_steer_assist_nudge_publisher_preserves_override_across_model_jump():
   msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_tracking_status == "override"
   assert msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.993, abs=0.001)
+  assert publisher.last_haptic_nudge_angle_deg == pytest.approx(0.993, abs=0.001)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(5.233, abs=0.001)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(5.233 - 17.38, abs=0.001)
+  assert 17.38 + msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(publisher.last_blended_target_angle_deg)
 
   publisher.update(
     {"steering": -8.0 / 180.0},
@@ -658,6 +661,54 @@ def test_steer_assist_nudge_publisher_preserves_override_across_model_jump():
     17.38,
     4.24,
     now=10.158,
+  )
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+  assert publisher.last_haptic_nudge_angle_deg == pytest.approx(0.0)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(4.24 - 17.38)
+
+  publisher.update(
+    {"steering": -17.0 / 180.0},
+    _steering_angle_to_g29_target(17.38),
+    17.38,
+    17.38,
+    now=10.182,
+  )
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "tracking"
+  assert not msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+
+def test_steer_assist_nudge_publisher_encodes_absolute_target_at_steering_limit():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  assert publisher.last_tracking_status == "override"
+
+  publisher.update(
+    {"steering": 65.0 / 180.0},
+    _steering_angle_to_g29_target(-294.0),
+    -294.0,
+    -65.0,
+    now=10.04,
+  )
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+  assert publisher.last_blended_target_angle_deg == pytest.approx(-65.0)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(229.0)
+  assert -294.0 + msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(-65.0)
+
+  publisher.update(
+    {"steering": 1.0},
+    _steering_angle_to_g29_target(-294.0),
+    -294.0,
+    -180.0,
+    now=10.06,
   )
   msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_tracking_status == "tracking"

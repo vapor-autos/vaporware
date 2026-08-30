@@ -259,6 +259,9 @@ class SteerAssistNudgePublisher:
     self.last_wheel_angle_deg = 0.0
     self.last_angle_error_deg = 0.0
     self.last_residual_angle_deg = 0.0
+    self.last_model_haptic_delta_deg = 0.0
+    self.last_haptic_nudge_angle_deg = 0.0
+    self.last_blended_target_angle_deg = 0.0
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
     self.last_wheel_velocity_deg_s = 0.0
@@ -286,6 +289,8 @@ class SteerAssistNudgePublisher:
     self.last_tracking_status = status
     self.tracking_since = None
     self._clear_candidate()
+    self.last_haptic_nudge_angle_deg = 0.0
+    self.last_blended_target_angle_deg = 0.0
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
@@ -362,7 +367,7 @@ class SteerAssistNudgePublisher:
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
-  def _update_detection(self, target_unstable: bool, now: float) -> None:
+  def _update_detection(self, target_unstable: bool, model_haptic_aligned: bool, now: float) -> None:
     error_deg = self.last_residual_angle_deg
     target_rate_deg_s = self.last_haptic_target_rate_deg_s
     relative_velocity_deg_s = self.last_relative_velocity_deg_s
@@ -419,7 +424,7 @@ class SteerAssistNudgePublisher:
         if self.candidate_evidence_s >= self.candidate_duration_s:
           self.last_tracking_status = "override"
 
-    if self.last_tracking_status == "override" and abs(error_deg) <= self.tracking_error_deg:
+    if self.last_tracking_status == "override" and abs(error_deg) <= self.tracking_error_deg and model_haptic_aligned:
       self.last_tracking_status = "tracking"
       self._clear_candidate()
 
@@ -441,6 +446,8 @@ class SteerAssistNudgePublisher:
     self.last_wheel_angle_deg = g29_steering_to_angle_deg(wheel_steering)
     self.last_angle_error_deg = self.last_wheel_angle_deg - float(target_steering_angle_deg) if requested_active else 0.0
     self.last_residual_angle_deg = self.last_wheel_angle_deg - haptic_target_angle_deg if requested_active else 0.0
+    clipped_model_target_angle_deg = _clip(float(target_steering_angle_deg), -180.0, 180.0) if requested_active else 0.0
+    self.last_model_haptic_delta_deg = clipped_model_target_angle_deg - haptic_target_angle_deg if requested_active else 0.0
 
     if requested_active and input_fresh:
       target_unstable = self._update_motion(
@@ -450,7 +457,8 @@ class SteerAssistNudgePublisher:
         base_target_log_mono_time,
         now,
       )
-      self._update_detection(target_unstable, now)
+      model_haptic_aligned = abs(self.last_model_haptic_delta_deg) <= self.tracking_error_deg
+      self._update_detection(target_unstable, model_haptic_aligned, now)
     elif requested_active:
       self._hold_detection_for_stale_target(now)
     else:
@@ -459,7 +467,7 @@ class SteerAssistNudgePublisher:
 
     active = requested_active and input_fresh and self.last_tracking_status == "override"
     self.last_active = active
-    self.last_raw_nudge_angle_deg = (
+    self.last_haptic_nudge_angle_deg = (
       compute_nudge_angle_deg(
         wheel_steering,
         haptic_target_angle_deg,
@@ -467,6 +475,16 @@ class SteerAssistNudgePublisher:
         full_assist_error_deg=self.full_assist_error_deg,
       )
       if active
+      else 0.0
+    )
+    self.last_blended_target_angle_deg = (
+      _clip(haptic_target_angle_deg + self.last_haptic_nudge_angle_deg, -180.0, 180.0)
+      if active
+      else haptic_target_angle_deg
+    )
+    self.last_raw_nudge_angle_deg = (
+      self.last_blended_target_angle_deg - float(target_steering_angle_deg)
+      if active and target_steering_angle_deg is not None
       else 0.0
     )
     self.last_nudge_angle_deg = self.last_raw_nudge_angle_deg
@@ -629,6 +647,9 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "wheel_angle_deg": steer_assist_publisher.last_wheel_angle_deg,
               "model_error_deg": steer_assist_publisher.last_angle_error_deg,
               "residual_deg": steer_assist_publisher.last_residual_angle_deg,
+              "model_haptic_delta_deg": steer_assist_publisher.last_model_haptic_delta_deg,
+              "haptic_nudge_deg": steer_assist_publisher.last_haptic_nudge_angle_deg,
+              "blended_target_angle_deg": steer_assist_publisher.last_blended_target_angle_deg,
               "raw_nudge_deg": steer_assist_publisher.last_raw_nudge_angle_deg,
               "nudge_deg": steer_assist_publisher.last_nudge_angle_deg,
               "force": command.force,
@@ -666,9 +687,11 @@ def _run(g29_sock, steer_assist_sock) -> None:
               f"wheel_angle={steer_assist_publisher.last_wheel_angle_deg:.2f}deg",
               f"model_error={steer_assist_publisher.last_angle_error_deg:.2f}deg",
               f"residual={steer_assist_publisher.last_residual_angle_deg:.2f}deg",
+              f"model_haptic_delta={steer_assist_publisher.last_model_haptic_delta_deg:.2f}deg",
               f"wheel_velocity={steer_assist_publisher.last_wheel_velocity_deg_s:.2f}deg/s",
               f"relative_velocity={steer_assist_publisher.last_relative_velocity_deg_s:.2f}deg/s",
-              f"raw_nudge={steer_assist_publisher.last_raw_nudge_angle_deg:.2f}deg",
+              f"haptic_nudge={steer_assist_publisher.last_haptic_nudge_angle_deg:.2f}deg",
+              f"blended_target={steer_assist_publisher.last_blended_target_angle_deg:.2f}deg",
               f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
               f"factor={command.speed_factor:.2f}",
               f"force_factor={command.force_factor:.2f}",

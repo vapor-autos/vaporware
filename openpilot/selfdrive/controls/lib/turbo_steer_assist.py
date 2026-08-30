@@ -70,6 +70,7 @@ class TurboSteerAssistSource:
     self.last_age_s: float | None = None
     self.last_context_age_s: float | None = None
     self.last_target_delta_deg: float | None = None
+    self.last_requested_target_angle_deg: float | None = None
     self.last_sequence = 0
     self.last_base_target_log_mono_time = 0
     self.last_raw_nudge_angle_deg = 0.0
@@ -85,6 +86,7 @@ class TurboSteerAssistSource:
     self.last_age_s = self._age(now)
     self.last_context_age_s = None
     self.last_target_delta_deg = None
+    self.last_requested_target_angle_deg = None
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
@@ -146,7 +148,12 @@ class TurboSteerAssistSource:
       self.last_status = "invalid_nudge"
       return 0.0, self.last_status
 
-    self.last_nudge_angle_deg = self.last_raw_nudge_angle_deg
+    self.last_requested_target_angle_deg = target_angle_deg + self.last_raw_nudge_angle_deg
+    if not math.isfinite(self.last_requested_target_angle_deg):
+      self.last_status = "invalid_target"
+      return 0.0, self.last_status
+
+    self.last_nudge_angle_deg = self.last_requested_target_angle_deg - float(model_angle_deg)
     self.last_status = "active"
     return self.last_nudge_angle_deg, self.last_status
 

@@ -97,6 +97,18 @@ def test_turbo_steer_assist_source_does_not_apply_small_nudge_cap():
   assert source.last_raw_nudge_angle_deg == pytest.approx(8.0)
 
 
+def test_turbo_steer_assist_source_reconstructs_absolute_blended_target():
+  sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=-12.0, target_angle_deg=17.0)
+  source = TurboSteerAssistSource(sm, stale_timeout_s=0.25)
+
+  nudge, status = source.update(lat_active=True, model_angle_deg=20.0, now=10.1)
+
+  assert status == "active"
+  assert source.last_requested_target_angle_deg == pytest.approx(5.0)
+  assert nudge == pytest.approx(-15.0)
+  assert 20.0 + nudge == pytest.approx(5.0)
+
+
 def test_turbo_steer_assist_source_returns_zero_when_inactive_or_stale():
   inactive = TurboSteerAssistSource(FakeSubMaster(active=False, nudge_angle_deg=2.0))
   assert inactive.update(lat_active=True, model_angle_deg=5.0, now=10.1) == (0.0, "inactive")
