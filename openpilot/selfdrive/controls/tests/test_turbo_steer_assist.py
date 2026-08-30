@@ -136,6 +136,39 @@ def test_turbo_steer_assist_source_rejects_target_mismatch():
   assert source.last_target_delta_deg == pytest.approx(16.0)
 
 
+def test_turbo_steer_assist_source_keeps_absolute_target_across_model_jump():
+  sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=2.0, target_angle_deg=5.0)
+  source = TurboSteerAssistSource(sm, target_mismatch_deg=15.0)
+  assert source.update(lat_active=True, model_angle_deg=5.0, now=10.1) == (2.0, "active")
+
+  sm.data["turboSteerAssist"] = FakeTurboSteerAssist(
+    nudge_angle_deg=2.0,
+    target_angle_deg=5.0,
+    sequence=2,
+    base_target_log_mono_time=10_100_000_000,
+  )
+  sm.recv_time["turboSteerAssist"] = 10.1
+
+  nudge, status = source.update(lat_active=True, model_angle_deg=40.0, now=10.2)
+  assert status == "active"
+  assert nudge == pytest.approx(-33.0)
+  assert 40.0 + nudge == pytest.approx(7.0)
+
+
+def test_turbo_steer_assist_source_requires_lineage_match_after_release():
+  sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=2.0, target_angle_deg=5.0)
+  source = TurboSteerAssistSource(sm, target_mismatch_deg=15.0)
+  assert source.update(lat_active=True, model_angle_deg=5.0, now=10.1) == (2.0, "active")
+
+  sm.data["turboSteerAssist"] = FakeTurboSteerAssist(active=False, sequence=2, base_target_log_mono_time=10_100_000_000)
+  sm.recv_time["turboSteerAssist"] = 10.1
+  assert source.update(lat_active=True, model_angle_deg=5.0, now=10.2) == (0.0, "inactive")
+
+  sm.data["turboSteerAssist"] = FakeTurboSteerAssist(sequence=3, base_target_log_mono_time=10_200_000_000)
+  sm.recv_time["turboSteerAssist"] = 10.2
+  assert source.update(lat_active=True, model_angle_deg=21.0, now=10.3) == (0.0, "target_mismatch")
+
+
 def test_turbo_steer_assist_source_accepts_newer_target_after_sequence_restart():
   sm = FakeSubMaster(recv_time=10.0, nudge_angle_deg=2.0, sequence=20)
   source = TurboSteerAssistSource(sm)
