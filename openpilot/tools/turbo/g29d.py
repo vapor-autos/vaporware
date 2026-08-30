@@ -30,6 +30,7 @@ STEER_ASSIST_MAX_TARGET_STEP_DEG = 15.0
 STEER_ASSIST_MAX_TARGET_RATE_DEG_S = 300.0
 STEER_ASSIST_WHEEL_VELOCITY_TAU_S = 0.06
 STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S = 180.0
+STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S = 180.0
 STEER_ASSIST_HAPTIC_FORCE = 0.4
 STEER_ASSIST_HAPTIC_FRICTION = 0.25
 STEER_ASSIST_METRICS_NAME = "g29-steer-assist"
@@ -240,6 +241,7 @@ class SteerAssistNudgePublisher:
     max_target_step_deg: float = STEER_ASSIST_MAX_TARGET_STEP_DEG,
     max_target_rate_deg_s: float = STEER_ASSIST_MAX_TARGET_RATE_DEG_S,
     wheel_velocity_tau_s: float = STEER_ASSIST_WHEEL_VELOCITY_TAU_S,
+    override_slew_rate_deg_s: float = STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S,
   ):
     self.sock = sock
     self.inner_deadband_deg = inner_deadband_deg
@@ -252,6 +254,7 @@ class SteerAssistNudgePublisher:
     self.max_target_step_deg = max(0.0, max_target_step_deg)
     self.max_target_rate_deg_s = max(0.0, max_target_rate_deg_s)
     self.wheel_velocity_tau_s = max(0.0, wheel_velocity_tau_s)
+    self.override_slew_rate_deg_s = max(0.0, override_slew_rate_deg_s)
     self.sequence = 0
     self.last_active = False
     self.last_tracking_status = "disengaged"
@@ -261,7 +264,9 @@ class SteerAssistNudgePublisher:
     self.last_residual_angle_deg = 0.0
     self.last_model_haptic_delta_deg = 0.0
     self.last_haptic_nudge_angle_deg = 0.0
+    self.last_desired_blended_target_angle_deg = 0.0
     self.last_blended_target_angle_deg = 0.0
+    self.last_override_slewing = False
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
     self.last_wheel_velocity_deg_s = 0.0
@@ -279,6 +284,8 @@ class SteerAssistNudgePublisher:
     self.candidate_last_update_time: float | None = None
     self.candidate_evidence_s = 0.0
     self.candidate_error_sign = 0.0
+    self.override_slew_start_time: float | None = None
+    self.override_slew_complete = False
 
   def _clear_candidate(self) -> None:
     self.candidate_last_update_time = None
@@ -290,7 +297,11 @@ class SteerAssistNudgePublisher:
     self.tracking_since = None
     self._clear_candidate()
     self.last_haptic_nudge_angle_deg = 0.0
+    self.last_desired_blended_target_angle_deg = 0.0
     self.last_blended_target_angle_deg = 0.0
+    self.last_override_slewing = False
+    self.override_slew_start_time = None
+    self.override_slew_complete = False
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
@@ -428,6 +439,27 @@ class SteerAssistNudgePublisher:
       self.last_tracking_status = "tracking"
       self._clear_candidate()
 
+  def _slew_override_target(self, desired_target_angle_deg: float, model_target_angle_deg: float, now: float) -> float:
+    desired_target_angle_deg = _clip(desired_target_angle_deg, -180.0, 180.0)
+    model_target_angle_deg = _clip(model_target_angle_deg, -180.0, 180.0)
+    if not self.last_active or self.override_slew_start_time is None:
+      self.override_slew_start_time = now
+      self.override_slew_complete = not math.isfinite(self.override_slew_rate_deg_s)
+
+    if self.override_slew_complete:
+      self.last_override_slewing = False
+      return desired_target_angle_deg
+
+    max_correction_deg = self.override_slew_rate_deg_s * max(0.0, now - self.override_slew_start_time)
+    desired_correction_deg = desired_target_angle_deg - model_target_angle_deg
+    if abs(desired_correction_deg) <= max_correction_deg:
+      self.override_slew_complete = True
+      self.last_override_slewing = False
+      return desired_target_angle_deg
+
+    self.last_override_slewing = True
+    return model_target_angle_deg + _clip(desired_correction_deg, -max_correction_deg, max_correction_deg)
+
   def update(
     self,
     state: dict,
@@ -466,7 +498,6 @@ class SteerAssistNudgePublisher:
       self._reset_motion()
 
     active = requested_active and input_fresh and self.last_tracking_status == "override"
-    self.last_active = active
     self.last_haptic_nudge_angle_deg = (
       compute_nudge_angle_deg(
         wheel_steering,
@@ -477,17 +508,31 @@ class SteerAssistNudgePublisher:
       if active
       else 0.0
     )
-    self.last_blended_target_angle_deg = (
+    self.last_desired_blended_target_angle_deg = (
       _clip(haptic_target_angle_deg + self.last_haptic_nudge_angle_deg, -180.0, 180.0)
       if active
       else haptic_target_angle_deg
     )
+    self.last_blended_target_angle_deg = (
+      self._slew_override_target(
+        self.last_desired_blended_target_angle_deg,
+        clipped_model_target_angle_deg,
+        now,
+      )
+      if active
+      else haptic_target_angle_deg
+    )
+    if not active:
+      self.last_override_slewing = False
+      self.override_slew_start_time = None
+      self.override_slew_complete = False
     self.last_raw_nudge_angle_deg = (
       self.last_blended_target_angle_deg - float(target_steering_angle_deg)
       if active and target_steering_angle_deg is not None
       else 0.0
     )
     self.last_nudge_angle_deg = self.last_raw_nudge_angle_deg
+    self.last_active = active
 
     msg = messaging.new_message("turboSteerAssist")
     msg.valid = True
@@ -561,6 +606,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
           f"steer_assist_min_opposing_velocity={STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S:.0f}deg/s",
           f"steer_assist_max_candidate_target_rate={STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_max_rate={STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S:.0f}deg/s",
+          f"steer_assist_override_slew_rate={STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_force={STEER_ASSIST_HAPTIC_FORCE:.2f}",
           f"steer_assist_haptic_friction={STEER_ASSIST_HAPTIC_FRICTION:.2f}",
           f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
@@ -629,6 +675,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "max_target_step_deg": STEER_ASSIST_MAX_TARGET_STEP_DEG,
               "max_target_rate_deg_s": STEER_ASSIST_MAX_TARGET_RATE_DEG_S,
               "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
+              "override_slew_rate_deg_s": STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S,
+              "override_slewing": steer_assist_publisher.last_override_slewing,
               "target_step_deg": steer_assist_publisher.last_target_step_deg,
               "target_rate_deg_s": steer_assist_publisher.last_target_rate_deg_s,
               "target_interval_s": steer_assist_publisher.last_target_interval_s,
@@ -649,6 +697,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "residual_deg": steer_assist_publisher.last_residual_angle_deg,
               "model_haptic_delta_deg": steer_assist_publisher.last_model_haptic_delta_deg,
               "haptic_nudge_deg": steer_assist_publisher.last_haptic_nudge_angle_deg,
+              "desired_blended_target_angle_deg": steer_assist_publisher.last_desired_blended_target_angle_deg,
               "blended_target_angle_deg": steer_assist_publisher.last_blended_target_angle_deg,
               "raw_nudge_deg": steer_assist_publisher.last_raw_nudge_angle_deg,
               "nudge_deg": steer_assist_publisher.last_nudge_angle_deg,
@@ -691,7 +740,9 @@ def _run(g29_sock, steer_assist_sock) -> None:
               f"wheel_velocity={steer_assist_publisher.last_wheel_velocity_deg_s:.2f}deg/s",
               f"relative_velocity={steer_assist_publisher.last_relative_velocity_deg_s:.2f}deg/s",
               f"haptic_nudge={steer_assist_publisher.last_haptic_nudge_angle_deg:.2f}deg",
+              f"desired_blended_target={steer_assist_publisher.last_desired_blended_target_angle_deg:.2f}deg",
               f"blended_target={steer_assist_publisher.last_blended_target_angle_deg:.2f}deg",
+              f"override_slewing={steer_assist_publisher.last_override_slewing}",
               f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
               f"factor={command.speed_factor:.2f}",
               f"force_factor={command.force_factor:.2f}",

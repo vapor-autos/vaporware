@@ -144,6 +144,7 @@ def make_steer_assist_publisher(sock, **kwargs):
     "max_target_step_deg": 1e6,
     "max_target_rate_deg_s": 1e6,
     "wheel_velocity_tau_s": 0.0,
+    "override_slew_rate_deg_s": float("inf"),
   }
   options.update(kwargs)
   return SteerAssistNudgePublisher(sock, **options)
@@ -586,6 +587,50 @@ def test_steer_assist_nudge_publisher_latches_and_releases_override():
   assert publisher.last_tracking_status == "tracking"
   assert not msg.turboSteerAssist.active
   assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+
+def test_steer_assist_nudge_publisher_slews_only_override_acquisition():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, candidate_duration_s=0.0, override_slew_rate_deg_s=180.0)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+  assert publisher.last_desired_blended_target_angle_deg == pytest.approx(20.0)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(0.0)
+  assert publisher.last_override_slewing
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+  publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.04)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(3.6)
+  assert publisher.last_override_slewing
+
+  publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.14)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(20.0)
+  assert not publisher.last_override_slewing
+
+  publisher.update({"steering": -25.0 / 180.0}, 0.0, 0.0, 0.0, now=10.16)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_desired_blended_target_angle_deg == pytest.approx(25.0)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(25.0)
+  assert not publisher.last_override_slewing
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(25.0)
+
+
+def test_steer_assist_nudge_publisher_slew_starts_at_clipped_model_target():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, candidate_duration_s=0.0, override_slew_rate_deg_s=180.0)
+
+  publisher.update({"steering": -170.0 / 180.0}, _steering_angle_to_g29_target(200.0), 200.0, 170.0, now=10.0)
+  publisher.update({"steering": -180.0 / 180.0}, _steering_angle_to_g29_target(200.0), 200.0, 170.0, now=10.02)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+
+  assert publisher.last_tracking_status == "override"
+  assert publisher.last_desired_blended_target_angle_deg == pytest.approx(180.0)
+  assert publisher.last_blended_target_angle_deg == pytest.approx(180.0)
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(-20.0)
 
 
 def test_steer_assist_nudge_publisher_cancels_candidate_when_spring_recovers():
