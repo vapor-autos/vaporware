@@ -584,9 +584,61 @@ def test_steer_assist_nudge_publisher_latches_and_releases_override():
 
   publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.15)
   msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+
+  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.16)
+  assert publisher.release_since == pytest.approx(10.16)
+  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.35)
+  assert publisher.last_tracking_status == "override"
+  assert publisher.release_evidence_s == pytest.approx(0.19)
+
+  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.37)
+  msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_tracking_status == "tracking"
   assert not msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
+  assert publisher.release_since is None
+
+
+def test_steer_assist_nudge_publisher_stays_latched_across_haptic_target():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  assert publisher.last_tracking_status == "override"
+
+  for now, wheel_angle_deg in ((10.04, 4.0), (10.06, -4.0), (10.08, -10.0)):
+    publisher.update({"steering": -wheel_angle_deg / 180.0}, 0.0, 0.0, 0.0, now=now)
+    assert publisher.last_tracking_status == "override"
+    assert messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
+
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(-10.0)
+  assert publisher.release_since is None
+
+
+def test_steer_assist_nudge_publisher_does_not_release_when_target_crosses_wheel():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -20.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  assert publisher.last_tracking_status == "override"
+
+  for now, target_angle_deg in ((10.22, 16.0), (10.27, 20.0), (10.32, 24.0)):
+    publisher.update(
+      {"steering": -20.0 / 180.0},
+      _steering_angle_to_g29_target(target_angle_deg),
+      target_angle_deg,
+      target_angle_deg,
+      now=now,
+    )
+    assert publisher.last_tracking_status == "override"
+    assert messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
+
+  assert publisher.release_since is None
 
 
 def test_steer_assist_nudge_publisher_slews_only_override_acquisition():
@@ -721,6 +773,24 @@ def test_steer_assist_nudge_publisher_preserves_blended_target_across_model_jump
     now=10.182,
   )
   msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+
+  publisher.update(
+    {"steering": -17.0 / 180.0},
+    _steering_angle_to_g29_target(17.38),
+    17.38,
+    17.38,
+    now=10.202,
+  )
+  publisher.update(
+    {"steering": -17.0 / 180.0},
+    _steering_angle_to_g29_target(17.38),
+    17.38,
+    17.38,
+    now=10.412,
+  )
+  msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_tracking_status == "tracking"
   assert not msg.turboSteerAssist.active
   assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(0.0)
@@ -754,6 +824,24 @@ def test_steer_assist_nudge_publisher_encodes_absolute_target_at_steering_limit(
     -294.0,
     -180.0,
     now=10.06,
+  )
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_tracking_status == "override"
+  assert msg.turboSteerAssist.active
+
+  publisher.update(
+    {"steering": 1.0},
+    _steering_angle_to_g29_target(-294.0),
+    -294.0,
+    -180.0,
+    now=10.08,
+  )
+  publisher.update(
+    {"steering": 1.0},
+    _steering_angle_to_g29_target(-294.0),
+    -294.0,
+    -180.0,
+    now=10.29,
   )
   msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_tracking_status == "tracking"

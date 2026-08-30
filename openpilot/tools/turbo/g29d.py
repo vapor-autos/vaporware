@@ -31,6 +31,8 @@ STEER_ASSIST_MAX_TARGET_RATE_DEG_S = 300.0
 STEER_ASSIST_WHEEL_VELOCITY_TAU_S = 0.06
 STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S = 180.0
 STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S = 180.0
+STEER_ASSIST_RELEASE_DURATION_S = 0.2
+STEER_ASSIST_MAX_RELEASE_RELATIVE_VELOCITY_DEG_S = 10.0
 STEER_ASSIST_HAPTIC_FORCE = 0.4
 STEER_ASSIST_HAPTIC_FRICTION = 0.25
 STEER_ASSIST_METRICS_NAME = "g29-steer-assist"
@@ -242,6 +244,8 @@ class SteerAssistNudgePublisher:
     max_target_rate_deg_s: float = STEER_ASSIST_MAX_TARGET_RATE_DEG_S,
     wheel_velocity_tau_s: float = STEER_ASSIST_WHEEL_VELOCITY_TAU_S,
     override_slew_rate_deg_s: float = STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S,
+    release_duration_s: float = STEER_ASSIST_RELEASE_DURATION_S,
+    max_release_relative_velocity_deg_s: float = STEER_ASSIST_MAX_RELEASE_RELATIVE_VELOCITY_DEG_S,
   ):
     self.sock = sock
     self.inner_deadband_deg = inner_deadband_deg
@@ -255,6 +259,8 @@ class SteerAssistNudgePublisher:
     self.max_target_rate_deg_s = max(0.0, max_target_rate_deg_s)
     self.wheel_velocity_tau_s = max(0.0, wheel_velocity_tau_s)
     self.override_slew_rate_deg_s = max(0.0, override_slew_rate_deg_s)
+    self.release_duration_s = max(0.0, release_duration_s)
+    self.max_release_relative_velocity_deg_s = max(0.0, max_release_relative_velocity_deg_s)
     self.sequence = 0
     self.last_active = False
     self.last_tracking_status = "disengaged"
@@ -284,6 +290,8 @@ class SteerAssistNudgePublisher:
     self.candidate_last_update_time: float | None = None
     self.candidate_evidence_s = 0.0
     self.candidate_error_sign = 0.0
+    self.release_since: float | None = None
+    self.release_evidence_s = 0.0
     self.override_slew_start_time: float | None = None
     self.override_slew_complete = False
 
@@ -292,10 +300,15 @@ class SteerAssistNudgePublisher:
     self.candidate_evidence_s = 0.0
     self.candidate_error_sign = 0.0
 
+  def _clear_release_candidate(self) -> None:
+    self.release_since = None
+    self.release_evidence_s = 0.0
+
   def _reset_detection(self, status: str) -> None:
     self.last_tracking_status = status
     self.tracking_since = None
     self._clear_candidate()
+    self._clear_release_candidate()
     self.last_haptic_nudge_angle_deg = 0.0
     self.last_desired_blended_target_angle_deg = 0.0
     self.last_blended_target_angle_deg = 0.0
@@ -370,6 +383,7 @@ class SteerAssistNudgePublisher:
     )
 
   def _hold_detection_for_stale_target(self, now: float) -> None:
+    self._clear_release_candidate()
     if self.last_tracking_status == "candidate":
       self.last_tracking_status = "tracking"
       self._clear_candidate()
@@ -435,9 +449,24 @@ class SteerAssistNudgePublisher:
         if self.candidate_evidence_s >= self.candidate_duration_s:
           self.last_tracking_status = "override"
 
-    if self.last_tracking_status == "override" and abs(error_deg) <= self.tracking_error_deg and model_haptic_aligned:
-      self.last_tracking_status = "tracking"
-      self._clear_candidate()
+    if self.last_tracking_status == "override":
+      release_ready = (
+        abs(error_deg) <= self.tracking_error_deg
+        and model_haptic_aligned
+        and abs(relative_velocity_deg_s) <= self.max_release_relative_velocity_deg_s
+      )
+      if not release_ready:
+        self._clear_release_candidate()
+      else:
+        if self.release_since is None:
+          self.release_since = now
+        self.release_evidence_s = max(0.0, now - self.release_since)
+        if self.release_evidence_s >= self.release_duration_s:
+          self.last_tracking_status = "tracking"
+          self._clear_candidate()
+          self._clear_release_candidate()
+    else:
+      self._clear_release_candidate()
 
   def _slew_override_target(self, desired_target_angle_deg: float, model_target_angle_deg: float, now: float) -> float:
     desired_target_angle_deg = _clip(desired_target_angle_deg, -180.0, 180.0)
@@ -607,6 +636,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
           f"steer_assist_max_candidate_target_rate={STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_max_rate={STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_override_slew_rate={STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S:.0f}deg/s",
+          f"steer_assist_release_duration={STEER_ASSIST_RELEASE_DURATION_S:.2f}s",
+          f"steer_assist_max_release_relative_velocity={STEER_ASSIST_MAX_RELEASE_RELATIVE_VELOCITY_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_force={STEER_ASSIST_HAPTIC_FORCE:.2f}",
           f"steer_assist_haptic_friction={STEER_ASSIST_HAPTIC_FRICTION:.2f}",
           f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
@@ -677,6 +708,10 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
               "override_slew_rate_deg_s": STEER_ASSIST_OVERRIDE_SLEW_RATE_DEG_S,
               "override_slewing": steer_assist_publisher.last_override_slewing,
+              "release_duration_s": STEER_ASSIST_RELEASE_DURATION_S,
+              "max_release_relative_velocity_deg_s": STEER_ASSIST_MAX_RELEASE_RELATIVE_VELOCITY_DEG_S,
+              "release_pending": steer_assist_publisher.release_since is not None,
+              "release_evidence_s": steer_assist_publisher.release_evidence_s,
               "target_step_deg": steer_assist_publisher.last_target_step_deg,
               "target_rate_deg_s": steer_assist_publisher.last_target_rate_deg_s,
               "target_interval_s": steer_assist_publisher.last_target_interval_s,
@@ -743,6 +778,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
               f"desired_blended_target={steer_assist_publisher.last_desired_blended_target_angle_deg:.2f}deg",
               f"blended_target={steer_assist_publisher.last_blended_target_angle_deg:.2f}deg",
               f"override_slewing={steer_assist_publisher.last_override_slewing}",
+              f"release_pending={steer_assist_publisher.release_since is not None}",
+              f"release_evidence={steer_assist_publisher.release_evidence_s:.2f}s",
               f"nudge={steer_assist_publisher.last_nudge_angle_deg:.2f}deg",
               f"factor={command.speed_factor:.2f}",
               f"force_factor={command.force_factor:.2f}",
