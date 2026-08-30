@@ -25,7 +25,7 @@ STEER_ASSIST_TRACKING_ERROR_DEG = 5.0
 STEER_ASSIST_TRACKING_DURATION_S = 0.3
 STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S = 10.0
 STEER_ASSIST_CANDIDATE_DURATION_S = 0.08
-STEER_ASSIST_MAX_ACQUIRE_TARGET_RATE_DEG_S = 60.0
+STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S = 60.0
 STEER_ASSIST_MAX_TARGET_STEP_DEG = 15.0
 STEER_ASSIST_MAX_TARGET_RATE_DEG_S = 300.0
 STEER_ASSIST_WHEEL_VELOCITY_TAU_S = 0.06
@@ -236,7 +236,7 @@ class SteerAssistNudgePublisher:
     tracking_duration_s: float = STEER_ASSIST_TRACKING_DURATION_S,
     min_opposing_velocity_deg_s: float = STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S,
     candidate_duration_s: float = STEER_ASSIST_CANDIDATE_DURATION_S,
-    max_acquire_target_rate_deg_s: float = STEER_ASSIST_MAX_ACQUIRE_TARGET_RATE_DEG_S,
+    max_candidate_target_rate_deg_s: float = STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S,
     max_target_step_deg: float = STEER_ASSIST_MAX_TARGET_STEP_DEG,
     max_target_rate_deg_s: float = STEER_ASSIST_MAX_TARGET_RATE_DEG_S,
     wheel_velocity_tau_s: float = STEER_ASSIST_WHEEL_VELOCITY_TAU_S,
@@ -248,7 +248,7 @@ class SteerAssistNudgePublisher:
     self.tracking_duration_s = max(0.0, tracking_duration_s)
     self.min_opposing_velocity_deg_s = max(0.0, min_opposing_velocity_deg_s)
     self.candidate_duration_s = max(0.0, candidate_duration_s)
-    self.max_acquire_target_rate_deg_s = max(0.0, max_acquire_target_rate_deg_s)
+    self.max_candidate_target_rate_deg_s = max(0.0, max_candidate_target_rate_deg_s)
     self.max_target_step_deg = max(0.0, max_target_step_deg)
     self.max_target_rate_deg_s = max(0.0, max_target_rate_deg_s)
     self.wheel_velocity_tau_s = max(0.0, wheel_velocity_tau_s)
@@ -273,14 +273,19 @@ class SteerAssistNudgePublisher:
     self.last_update_time: float | None = None
     self.last_motion_wheel_angle_deg: float | None = None
     self.tracking_since: float | None = None
-    self.candidate_since: float | None = None
+    self.candidate_last_update_time: float | None = None
+    self.candidate_evidence_s = 0.0
+    self.candidate_error_sign = 0.0
+
+  def _clear_candidate(self) -> None:
+    self.candidate_last_update_time = None
+    self.candidate_evidence_s = 0.0
     self.candidate_error_sign = 0.0
 
   def _reset_detection(self, status: str) -> None:
     self.last_tracking_status = status
     self.tracking_since = None
-    self.candidate_since = None
-    self.candidate_error_sign = 0.0
+    self._clear_candidate()
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
 
@@ -351,8 +356,7 @@ class SteerAssistNudgePublisher:
   def _hold_detection_for_stale_target(self, now: float) -> None:
     if self.last_tracking_status == "candidate":
       self.last_tracking_status = "tracking"
-      self.candidate_since = None
-      self.candidate_error_sign = 0.0
+      self._clear_candidate()
     elif self.last_tracking_status == "acquiring_tracking":
       self.tracking_since = now
     self.last_raw_nudge_angle_deg = 0.0
@@ -361,14 +365,14 @@ class SteerAssistNudgePublisher:
   def _update_detection(self, target_unstable: bool, now: float) -> None:
     error_deg = self.last_residual_angle_deg
     target_rate_deg_s = self.last_haptic_target_rate_deg_s
-    wheel_velocity_deg_s = self.last_wheel_velocity_deg_s
+    relative_velocity_deg_s = self.last_relative_velocity_deg_s
 
     if target_unstable and self.last_tracking_status != "override":
       self._reset_detection("target_unstable")
       return
 
     if self.last_tracking_status not in ("tracking", "candidate", "override"):
-      tracking = abs(error_deg) <= self.tracking_error_deg and abs(target_rate_deg_s) <= self.max_acquire_target_rate_deg_s
+      tracking = abs(error_deg) <= self.tracking_error_deg
       if not tracking:
         self._reset_detection("disarmed")
         return
@@ -382,29 +386,42 @@ class SteerAssistNudgePublisher:
     if self.last_tracking_status == "tracking":
       opposing = (
         abs(error_deg) > self.inner_deadband_deg
-        and abs(target_rate_deg_s) <= self.max_acquire_target_rate_deg_s
-        and abs(wheel_velocity_deg_s) >= self.min_opposing_velocity_deg_s
-        and error_deg * wheel_velocity_deg_s > 0.0
+        and abs(target_rate_deg_s) <= self.max_candidate_target_rate_deg_s
+        and abs(relative_velocity_deg_s) >= self.min_opposing_velocity_deg_s
+        and error_deg * relative_velocity_deg_s > 0.0
       )
       if opposing:
         self.last_tracking_status = "candidate"
-        self.candidate_since = now
+        self.candidate_last_update_time = now
+        self.candidate_evidence_s = 0.0
         self.candidate_error_sign = math.copysign(1.0, error_deg)
 
     if self.last_tracking_status == "candidate":
+      candidate_dt = max(0.0, now - self.candidate_last_update_time) if self.candidate_last_update_time is not None else 0.0
+      self.candidate_last_update_time = now
       error_sign_changed = error_deg == 0.0 or math.copysign(1.0, error_deg) != self.candidate_error_sign
-      moving_with_spring = abs(wheel_velocity_deg_s) >= self.min_opposing_velocity_deg_s and error_deg * wheel_velocity_deg_s < 0.0
-      if abs(error_deg) <= self.inner_deadband_deg or abs(target_rate_deg_s) > self.max_acquire_target_rate_deg_s or error_sign_changed or moving_with_spring:
+      target_stable = abs(target_rate_deg_s) <= self.max_candidate_target_rate_deg_s
+      moving_away_from_spring = (
+        target_stable
+        and abs(relative_velocity_deg_s) >= self.min_opposing_velocity_deg_s
+        and error_deg * relative_velocity_deg_s > 0.0
+      )
+      moving_with_spring = (
+        target_stable
+        and abs(relative_velocity_deg_s) >= self.min_opposing_velocity_deg_s
+        and error_deg * relative_velocity_deg_s < 0.0
+      )
+      if abs(error_deg) <= self.inner_deadband_deg or error_sign_changed or moving_with_spring:
         self.last_tracking_status = "tracking"
-        self.candidate_since = None
-        self.candidate_error_sign = 0.0
-      elif self.candidate_since is not None and now - self.candidate_since >= self.candidate_duration_s:
-        self.last_tracking_status = "override"
+        self._clear_candidate()
+      elif moving_away_from_spring:
+        self.candidate_evidence_s += candidate_dt
+        if self.candidate_evidence_s >= self.candidate_duration_s:
+          self.last_tracking_status = "override"
 
     if self.last_tracking_status == "override" and abs(error_deg) <= self.tracking_error_deg:
       self.last_tracking_status = "tracking"
-      self.candidate_since = None
-      self.candidate_error_sign = 0.0
+      self._clear_candidate()
 
   def update(
     self,
@@ -524,6 +541,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
           f"steer_assist_tracking_duration={STEER_ASSIST_TRACKING_DURATION_S:.2f}s",
           f"steer_assist_candidate_duration={STEER_ASSIST_CANDIDATE_DURATION_S:.2f}s",
           f"steer_assist_min_opposing_velocity={STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S:.0f}deg/s",
+          f"steer_assist_max_candidate_target_rate={STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_max_rate={STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S:.0f}deg/s",
           f"steer_assist_haptic_force={STEER_ASSIST_HAPTIC_FORCE:.2f}",
           f"steer_assist_haptic_friction={STEER_ASSIST_HAPTIC_FRICTION:.2f}",
@@ -588,7 +606,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "tracking_duration_s": STEER_ASSIST_TRACKING_DURATION_S,
               "min_opposing_velocity_deg_s": STEER_ASSIST_MIN_OPPOSING_VELOCITY_DEG_S,
               "candidate_duration_s": STEER_ASSIST_CANDIDATE_DURATION_S,
-              "max_acquire_target_rate_deg_s": STEER_ASSIST_MAX_ACQUIRE_TARGET_RATE_DEG_S,
+              "candidate_evidence_s": steer_assist_publisher.candidate_evidence_s,
+              "max_candidate_target_rate_deg_s": STEER_ASSIST_MAX_CANDIDATE_TARGET_RATE_DEG_S,
               "max_target_step_deg": STEER_ASSIST_MAX_TARGET_STEP_DEG,
               "max_target_rate_deg_s": STEER_ASSIST_MAX_TARGET_RATE_DEG_S,
               "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
