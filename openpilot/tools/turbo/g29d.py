@@ -3,6 +3,7 @@ import math
 import time
 
 import openpilot.cereal.messaging as messaging
+from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
   DEFAULT_FULL_ASSIST_ERROR_DEG,
   DEFAULT_INNER_DEADBAND_DEG,
@@ -13,7 +14,8 @@ from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, write_metrics_payload
 
 RETRY_DELAY = 2.0
-PUBLISH_INTERVAL = 0.02
+PUBLISH_RATE_HZ = 50
+STEER_ASSIST_METRICS_INTERVAL_FRAMES = 5
 LOG_INTERVAL_FRAMES = 50
 
 TORQUE_SIM_MAX_VELOCITY_M_S = 20.0
@@ -628,6 +630,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
       " ".join(
         (
           "g29d torque_sim enabled",
+          f"publish_rate={PUBLISH_RATE_HZ}Hz",
+          f"metrics_rate={PUBLISH_RATE_HZ / STEER_ASSIST_METRICS_INTERVAL_FRAMES:g}Hz",
           "speed_source=carState",
           "assist_target=controlsState",
           "pedal_fallback=True",
@@ -655,8 +659,8 @@ def _run(g29_sock, steer_assist_sock) -> None:
     )
 
     frame = 0
+    rk = Ratekeeper(PUBLISH_RATE_HZ, print_delay_threshold=None)
     while True:
-      time.sleep(PUBLISH_INTERVAL)
       now = time.monotonic()
       state = g29.get_state()
       events = g29.get_events()
@@ -694,7 +698,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
       target_angle = assist_target_source.last_target_angle_deg
       applied_angle = assist_target_source.last_applied_angle_deg
 
-      if assist_published:
+      if assist_published and frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
         write_metrics_payload(
           {
             "steer_assist": {
@@ -800,6 +804,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
 
       _publish_state(g29_sock, state, events)
       frame += 1
+      rk.keep_time()
   finally:
     if g29 is not None:
       g29.force_off()
