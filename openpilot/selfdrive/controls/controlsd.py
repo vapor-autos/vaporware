@@ -156,10 +156,14 @@ class Controls:
       actuators.curvature = float(lateral_output)
     else:
       model_angle_deg = float(lateral_output)
-      assist_nudge_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
-      final_angle_deg = clip_steering_angle_deg(model_angle_deg + assist_nudge_deg) if self.turbo_steer_assist_apply else model_angle_deg
+      assist_target_deg, assist_status = self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
+      final_angle_deg = (
+        clip_steering_angle_deg(assist_target_deg)
+        if self.turbo_steer_assist_apply and assist_target_deg is not None
+        else model_angle_deg
+      )
       actuators.steeringAngleDeg = final_angle_deg
-      self.log_turbo_steer_assist(model_angle_deg, assist_nudge_deg, final_angle_deg, assist_status)
+      self.log_turbo_steer_assist(model_angle_deg, assist_target_deg, final_angle_deg, assist_status)
 
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
@@ -173,7 +177,13 @@ class Controls:
 
     return CC, lac_log
 
-  def log_turbo_steer_assist(self, model_angle_deg: float, nudge_angle_deg: float, final_angle_deg: float, status: str) -> None:
+  def log_turbo_steer_assist(
+    self,
+    model_angle_deg: float,
+    assist_target_deg: float | None,
+    final_angle_deg: float,
+    status: str,
+  ) -> None:
     if self.CP.brand != "turbo":
       return
     now = time.monotonic()
@@ -183,18 +193,19 @@ class Controls:
     age_text = "none" if age is None else f"{age:.3f}s"
     context_age = self.turbo_steer_assist_source.last_context_age_s
     context_age_text = "none" if context_age is None else f"{context_age:.3f}s"
-    target_delta = self.turbo_steer_assist_source.last_target_delta_deg
-    target_delta_text = "none" if target_delta is None else f"{target_delta:.2f}deg"
+    base_model_delta = self.turbo_steer_assist_source.last_base_model_delta_deg
+    base_model_delta_text = "none" if base_model_delta is None else f"{base_model_delta:.2f}deg"
+    assist_target_text = "none" if assist_target_deg is None else f"{assist_target_deg:.2f}deg"
     cloudlog.info(
-      "turbo steer assist apply=%s status=%s age=%s context_age=%s target_delta=%s sequence=%d model_angle=%.2fdeg nudge=%.2fdeg final_angle=%.2fdeg",
+      "turbo steer assist apply=%s status=%s age=%s context_age=%s base_model_delta=%s sequence=%d model_angle=%.2fdeg assist_target=%s final_angle=%.2fdeg",
       self.turbo_steer_assist_apply,
       status,
       age_text,
       context_age_text,
-      target_delta_text,
+      base_model_delta_text,
       self.turbo_steer_assist_source.last_sequence,
       model_angle_deg,
-      nudge_angle_deg,
+      assist_target_text,
       final_angle_deg,
     )
     self.turbo_steer_assist_last_log = now

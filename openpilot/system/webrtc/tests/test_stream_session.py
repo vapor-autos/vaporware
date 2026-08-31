@@ -304,7 +304,7 @@ class TestStreamSession:
       "valid": True,
       "data": {
         "active": True,
-        "nudgeAngleDeg": 2.5,
+        "requestedSteeringAngleDeg": 12.5,
       },
     }
 
@@ -315,7 +315,7 @@ class TestStreamSession:
     assert forwarded.valid
     assert forwarded.logMonoTime == 123
     assert forwarded.turboSteerAssist.active
-    assert forwarded.turboSteerAssist.nudgeAngleDeg == 2.5
+    assert forwarded.turboSteerAssist.requestedSteeringAngleDeg == 12.5
 
   def test_livestream_track(self, mocker):
     fake_msg = messaging.new_message("livestreamDriverEncodeData")

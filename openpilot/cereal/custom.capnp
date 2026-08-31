@@ -21,12 +21,11 @@ struct CustomReserved2 @0xf35cc4560bbf6ec2 {
 
 struct TurboSteerAssist @0xda96579883444c35 {
   active @0 :Bool;
-  nudgeAngleDeg @1 :Float32;
-  wheelSteering @2 :Float32;
-  targetSteeringAngleDeg @3 :Float32;
-  targetSteering @4 :Float32;
-  sequence @5 :UInt32;
-  baseTargetLogMonoTime @6 :UInt64;
+  requestedSteeringAngleDeg @1 :Float32;
+  wheelSteeringAngleDeg @2 :Float32;
+  baseModelSteeringAngleDeg @3 :Float32;
+  sequence @4 :UInt32;
+  baseModelLogMonoTime @5 :UInt64;
 }
 
 struct CustomReserved4 @0x80ae746ee2596b11 {

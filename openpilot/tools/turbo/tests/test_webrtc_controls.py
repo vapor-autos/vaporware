@@ -187,10 +187,11 @@ def test_cereal_data_channel_receiver_publishes_turbo_steer_assist():
     "valid": True,
     "data": {
       "active": True,
-      "nudgeAngleDeg": 2.5,
-      "wheelSteering": -0.6,
-      "targetSteeringAngleDeg": 90.0,
-      "targetSteering": -0.5,
+      "requestedSteeringAngleDeg": 92.5,
+      "wheelSteeringAngleDeg": 108.0,
+      "baseModelSteeringAngleDeg": 90.0,
+      "sequence": 7,
+      "baseModelLogMonoTime": 10_000_000_000,
     },
   }
 
@@ -200,8 +201,11 @@ def test_cereal_data_channel_receiver_publishes_turbo_steer_assist():
   assert service == "turboSteerAssist"
   assert msg.valid
   assert msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.nudgeAngleDeg == pytest.approx(2.5)
-  assert msg.turboSteerAssist.targetSteering == pytest.approx(-0.5)
+  assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(92.5)
+  assert msg.turboSteerAssist.wheelSteeringAngleDeg == pytest.approx(108.0)
+  assert msg.turboSteerAssist.baseModelSteeringAngleDeg == pytest.approx(90.0)
+  assert msg.turboSteerAssist.sequence == 7
+  assert msg.turboSteerAssist.baseModelLogMonoTime == 10_000_000_000
 
 
 def test_cereal_data_channel_receiver_ignores_non_allowlisted_service():

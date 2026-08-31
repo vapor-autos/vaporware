@@ -566,15 +566,14 @@ class SteerAssistNudgePublisher:
     msg = messaging.new_message("turboSteerAssist")
     msg.valid = True
     msg.turboSteerAssist.active = active
-    msg.turboSteerAssist.nudgeAngleDeg = self.last_nudge_angle_deg
-    msg.turboSteerAssist.wheelSteering = wheel_steering
-    msg.turboSteerAssist.targetSteering = target
-    msg.turboSteerAssist.targetSteeringAngleDeg = 0.0 if target_steering_angle_deg is None else float(target_steering_angle_deg)
+    msg.turboSteerAssist.requestedSteeringAngleDeg = self.last_blended_target_angle_deg if active else 0.0
+    msg.turboSteerAssist.wheelSteeringAngleDeg = self.last_wheel_angle_deg
+    msg.turboSteerAssist.baseModelSteeringAngleDeg = 0.0 if target_steering_angle_deg is None else float(target_steering_angle_deg)
     self.sequence = (self.sequence + 1) & 0xFFFFFFFF
     if self.sequence == 0:
       self.sequence = 1
     msg.turboSteerAssist.sequence = self.sequence
-    msg.turboSteerAssist.baseTargetLogMonoTime = int(base_target_log_mono_time) if requested_active else 0
+    msg.turboSteerAssist.baseModelLogMonoTime = int(base_target_log_mono_time) if requested_active else 0
     self.sock.send(msg.to_bytes())
     return True
 

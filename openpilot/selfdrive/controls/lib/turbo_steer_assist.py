@@ -69,27 +69,23 @@ class TurboSteerAssistSource:
     self.target_mismatch_deg = target_mismatch_deg
     self.last_age_s: float | None = None
     self.last_context_age_s: float | None = None
-    self.last_target_delta_deg: float | None = None
+    self.last_base_model_delta_deg: float | None = None
     self.last_requested_target_angle_deg: float | None = None
     self.last_sequence = 0
-    self.last_base_target_log_mono_time = 0
-    self.last_raw_nudge_angle_deg = 0.0
-    self.last_nudge_angle_deg = 0.0
+    self.last_base_model_log_mono_time = 0
     self.last_status = "unseen"
     self._current_key: tuple[int, int] | None = None
     self._current_key_status = "unseen"
-    self._last_accepted_base_target_log_mono_time = 0
+    self._last_accepted_base_model_log_mono_time = 0
     self._last_accepted_sequence = 0
     self._override_session_active = False
 
-  def update(self, lat_active: bool, model_angle_deg: float, now: float | None = None) -> tuple[float, str]:
+  def update(self, lat_active: bool, model_angle_deg: float, now: float | None = None) -> tuple[float | None, str]:
     now = time.monotonic() if now is None else now
     self.last_age_s = self._age(now)
     self.last_context_age_s = None
-    self.last_target_delta_deg = None
+    self.last_base_model_delta_deg = None
     self.last_requested_target_angle_deg = None
-    self.last_raw_nudge_angle_deg = 0.0
-    self.last_nudge_angle_deg = 0.0
 
     if not lat_active:
       return self._end_override_session("lat_inactive")
@@ -105,55 +101,50 @@ class TurboSteerAssistSource:
       return self._end_override_session("inactive")
 
     self.last_sequence = int(assist.sequence)
-    self.last_base_target_log_mono_time = int(assist.baseTargetLogMonoTime)
-    key = (self.last_base_target_log_mono_time, self.last_sequence)
+    self.last_base_model_log_mono_time = int(assist.baseModelLogMonoTime)
+    key = (self.last_base_model_log_mono_time, self.last_sequence)
     if key != self._current_key:
       self._current_key = key
-      if self.last_base_target_log_mono_time == 0 or self.last_sequence == 0:
+      if self.last_base_model_log_mono_time == 0 or self.last_sequence == 0:
         self._current_key_status = "missing_target_context"
-      elif self.last_base_target_log_mono_time < self._last_accepted_base_target_log_mono_time or (
-        self.last_base_target_log_mono_time == self._last_accepted_base_target_log_mono_time and self.last_sequence <= self._last_accepted_sequence
+      elif self.last_base_model_log_mono_time < self._last_accepted_base_model_log_mono_time or (
+        self.last_base_model_log_mono_time == self._last_accepted_base_model_log_mono_time and self.last_sequence <= self._last_accepted_sequence
       ):
         self._current_key_status = "out_of_order"
       else:
         self._current_key_status = "accepted"
-        self._last_accepted_base_target_log_mono_time = self.last_base_target_log_mono_time
+        self._last_accepted_base_model_log_mono_time = self.last_base_model_log_mono_time
         self._last_accepted_sequence = self.last_sequence
 
     if self._current_key_status != "accepted":
       return self._end_override_session(self._current_key_status)
 
-    self.last_context_age_s = now - self.last_base_target_log_mono_time / 1e9
+    self.last_context_age_s = now - self.last_base_model_log_mono_time / 1e9
     if self.last_context_age_s < 0.0:
       return self._end_override_session("future_target_context")
     if self.last_context_age_s > self.context_timeout_s:
       return self._end_override_session("stale_target_context")
 
-    target_angle_deg = float(assist.targetSteeringAngleDeg)
-    self.last_target_delta_deg = float(model_angle_deg) - target_angle_deg
-    if not math.isfinite(self.last_target_delta_deg):
+    base_model_angle_deg = float(assist.baseModelSteeringAngleDeg)
+    self.last_base_model_delta_deg = float(model_angle_deg) - base_model_angle_deg
+    if not math.isfinite(self.last_base_model_delta_deg):
       return self._end_override_session("target_mismatch")
-    if not self._override_session_active and abs(self.last_target_delta_deg) > self.target_mismatch_deg:
+    if not self._override_session_active and abs(self.last_base_model_delta_deg) > self.target_mismatch_deg:
       return self._end_override_session("target_mismatch")
 
-    self.last_raw_nudge_angle_deg = float(assist.nudgeAngleDeg)
-    if not math.isfinite(self.last_raw_nudge_angle_deg):
-      self.last_raw_nudge_angle_deg = 0.0
-      return self._end_override_session("invalid_nudge")
-
-    self.last_requested_target_angle_deg = target_angle_deg + self.last_raw_nudge_angle_deg
+    self.last_requested_target_angle_deg = float(assist.requestedSteeringAngleDeg)
     if not math.isfinite(self.last_requested_target_angle_deg):
       return self._end_override_session("invalid_target")
 
-    self.last_nudge_angle_deg = self.last_requested_target_angle_deg - float(model_angle_deg)
+    self.last_requested_target_angle_deg = clip_steering_angle_deg(self.last_requested_target_angle_deg)
     self._override_session_active = True
     self.last_status = "active"
-    return self.last_nudge_angle_deg, self.last_status
+    return self.last_requested_target_angle_deg, self.last_status
 
-  def _end_override_session(self, status: str) -> tuple[float, str]:
+  def _end_override_session(self, status: str) -> tuple[None, str]:
     self._override_session_active = False
     self.last_status = status
-    return 0.0, self.last_status
+    return None, self.last_status
 
   def _age(self, now: float) -> float | None:
     if not self.sm.seen["turboSteerAssist"]:
