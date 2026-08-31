@@ -88,7 +88,7 @@ _services: dict[str, tuple] = {
   "g29": (False, 50.),
   "teleopSendCan": (False, 20.),
   "teleopCarControl": (False, 20.),
-  "turboSteerAssist": (False, 20.),
+  "turboSteerAssist": (False, 50.),
   "alertDebug": (True, 20., 5),
   "livestreamWideRoadEncodeIdx": (False, 20.),
   "livestreamRoadEncodeIdx": (False, 20.),

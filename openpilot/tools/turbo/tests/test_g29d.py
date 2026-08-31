@@ -1,15 +1,21 @@
 import pytest
 
 from openpilot.cereal import messaging
+from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.turbo.g29d import (
   AssistTargetSource,
   HapticTargetLimiter,
+  PUBLISH_RATE_HZ,
   SpeedSource,
   SteerAssistNudgePublisher,
   _effect_position_to_steering_angle_deg,
   _make_assist_torque_controller,
   _steering_angle_to_g29_target,
 )
+
+
+def test_steer_assist_service_matches_publish_rate():
+  assert SERVICE_LIST["turboSteerAssist"].frequency == PUBLISH_RATE_HZ
 
 
 class FakeCarState:
