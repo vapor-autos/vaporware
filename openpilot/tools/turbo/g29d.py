@@ -292,7 +292,8 @@ class SteerAssistNudgePublisher:
     self.candidate_error_sign = 0.0
     self.release_since: float | None = None
     self.release_evidence_s = 0.0
-    self.override_slew_start_time: float | None = None
+    self.override_slew_last_update_time: float | None = None
+    self.override_slew_target_angle_deg: float | None = None
     self.override_slew_complete = False
 
   def _clear_candidate(self) -> None:
@@ -313,7 +314,8 @@ class SteerAssistNudgePublisher:
     self.last_desired_blended_target_angle_deg = 0.0
     self.last_blended_target_angle_deg = 0.0
     self.last_override_slewing = False
-    self.override_slew_start_time = None
+    self.override_slew_last_update_time = None
+    self.override_slew_target_angle_deg = None
     self.override_slew_complete = False
     self.last_raw_nudge_angle_deg = 0.0
     self.last_nudge_angle_deg = 0.0
@@ -471,23 +473,28 @@ class SteerAssistNudgePublisher:
   def _slew_override_target(self, desired_target_angle_deg: float, model_target_angle_deg: float, now: float) -> float:
     desired_target_angle_deg = _clip(desired_target_angle_deg, -180.0, 180.0)
     model_target_angle_deg = _clip(model_target_angle_deg, -180.0, 180.0)
-    if not self.last_active or self.override_slew_start_time is None:
-      self.override_slew_start_time = now
+    if not self.last_active or self.override_slew_last_update_time is None or self.override_slew_target_angle_deg is None:
+      self.override_slew_last_update_time = now
+      self.override_slew_target_angle_deg = model_target_angle_deg
       self.override_slew_complete = not math.isfinite(self.override_slew_rate_deg_s)
 
     if self.override_slew_complete:
       self.last_override_slewing = False
       return desired_target_angle_deg
 
-    max_correction_deg = self.override_slew_rate_deg_s * max(0.0, now - self.override_slew_start_time)
-    desired_correction_deg = desired_target_angle_deg - model_target_angle_deg
-    if abs(desired_correction_deg) <= max_correction_deg:
+    dt = max(0.0, now - self.override_slew_last_update_time)
+    self.override_slew_last_update_time = now
+    max_delta_deg = self.override_slew_rate_deg_s * dt
+    target_delta_deg = desired_target_angle_deg - self.override_slew_target_angle_deg
+    if abs(target_delta_deg) <= max_delta_deg:
+      self.override_slew_target_angle_deg = desired_target_angle_deg
       self.override_slew_complete = True
       self.last_override_slewing = False
       return desired_target_angle_deg
 
+    self.override_slew_target_angle_deg += _clip(target_delta_deg, -max_delta_deg, max_delta_deg)
     self.last_override_slewing = True
-    return model_target_angle_deg + _clip(desired_correction_deg, -max_correction_deg, max_correction_deg)
+    return self.override_slew_target_angle_deg
 
   def update(
     self,
@@ -553,7 +560,8 @@ class SteerAssistNudgePublisher:
     )
     if not active:
       self.last_override_slewing = False
-      self.override_slew_start_time = None
+      self.override_slew_last_update_time = None
+      self.override_slew_target_angle_deg = None
       self.override_slew_complete = False
     self.last_raw_nudge_angle_deg = (
       self.last_blended_target_angle_deg - float(target_steering_angle_deg)
