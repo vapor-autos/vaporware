@@ -1,5 +1,7 @@
 import asyncio
+from collections.abc import Callable
 import json
+import socket
 import struct
 import time
 from typing import Any
@@ -16,6 +18,9 @@ FEEDBACK_PACKET_PAYLOAD_SIZE = 1000
 FEEDBACK_REASSEMBLY_TIMEOUT_S = 2.0
 FEEDBACK_MAX_PENDING_MESSAGES = 64
 _FEEDBACK_PACKET_HEADER = struct.Struct("!4sIHH")
+UDP_CONTROL_SERVICES = frozenset(("g29", "turboSteerAssist"))
+TELEOP_COMMAND_SERVICE = "turboTeleopCommand"
+G29_EDGE_FIELDS = ("dpadUp", "dpadDown", "l2", "l3")
 
 
 def create_feedback_data_channel(peer_connection, message_handler):
@@ -135,6 +140,17 @@ def parse_control_services(services_arg: str) -> list[str]:
   return services
 
 
+def split_control_services(services: list[str], udp_enabled: bool) -> tuple[list[str], list[str]]:
+  if not udp_enabled:
+    return [], list(services)
+
+  udp_services = [service for service in services if udp_enabled and service in UDP_CONTROL_SERVICES]
+  reliable_services = [service for service in services if service not in udp_services]
+  if "g29" in services and TELEOP_COMMAND_SERVICE not in reliable_services:
+    reliable_services.append(TELEOP_COMMAND_SERVICE)
+  return udp_services, reliable_services
+
+
 def expand_feedback_services(services_arg: str, profile_arg: str = "") -> list[str]:
   services: list[str] = []
   for profile in parse_services(profile_arg):
@@ -204,6 +220,19 @@ def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   return json.dumps(msg).encode()
 
 
+def udp_control_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
+  msg_data = project_feedback_message(service, sm[service])
+  if service == "g29":
+    msg_data = {**msg_data, **dict.fromkeys(G29_EDGE_FIELDS, False)}
+  msg = {
+    "type": service,
+    "logMonoTime": sm.logMonoTime[service],
+    "valid": sm.valid[service],
+    "data": msg_data,
+  }
+  return json.dumps(msg).encode()
+
+
 class CerealDataChannelReceiver:
   def __init__(self, services: list[str], pm: messaging.PubMaster | None = None):
     self.services = list(services)
@@ -211,6 +240,8 @@ class CerealDataChannelReceiver:
     self.pm = messaging.PubMaster(self.services) if pm is None else pm
     self.received: dict[str, int] = dict.fromkeys(services, 0)
     self.ignored = 0
+    self.out_of_order = 0
+    self.last_log_mono_time: dict[str, int] = dict.fromkeys(services, 0)
     self.reassembler = FeedbackPacketReassembler()
 
   def receive(self, message: bytes | str) -> bool:
@@ -234,6 +265,12 @@ class CerealDataChannelReceiver:
       self.ignored += 1
       return False
 
+    log_mono_time = int(payload.get("logMonoTime", time.monotonic() * 1e9))
+    if log_mono_time <= self.last_log_mono_time[service]:
+      self.ignored += 1
+      self.out_of_order += 1
+      return False
+
     msg_data = payload.get("data")
     size = None
     if not isinstance(msg_data, dict):
@@ -243,12 +280,52 @@ class CerealDataChannelReceiver:
       service,
       size=size,
       valid=bool(payload.get("valid", False)),
-      logMonoTime=int(payload.get("logMonoTime", time.monotonic() * 1e9)),
+      logMonoTime=log_mono_time,
     )
     setattr(msg, service, msg_data)
     self.pm.send(service, msg)
+    self.last_log_mono_time[service] = log_mono_time
     self.received[service] += 1
     return True
+
+
+class CerealDatagramProtocol(asyncio.DatagramProtocol):
+  def __init__(self, receiver: Callable[[], CerealDataChannelReceiver | None]):
+    self.receiver = receiver
+    self.received_packets = 0
+    self.received_bytes = 0
+    self.ignored_packets = 0
+
+  def datagram_received(self, data: bytes, addr) -> None:
+    receiver = self.receiver()
+    if receiver is None:
+      self.ignored_packets += 1
+      return
+    try:
+      accepted = receiver.receive(data)
+    except (TypeError, ValueError):
+      accepted = False
+    if accepted:
+      self.received_packets += 1
+      self.received_bytes += len(data)
+    else:
+      self.ignored_packets += 1
+
+
+class UdpCerealChannel:
+  label = "control-udp"
+  bufferedAmount = 0
+
+  def __init__(self, endpoint: tuple[str, int]):
+    self.endpoint = endpoint
+    self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.socket.connect(endpoint)
+
+  def send(self, payload: bytes) -> None:
+    self.socket.send(payload)
+
+  def close(self) -> None:
+    self.socket.close()
 
 
 class CerealDataChannelSender:
@@ -259,12 +336,16 @@ class CerealDataChannelSender:
     update_interval: float = 0.01,
     log_interval: float = 5.0,
     max_buffered_amount: int = 65536,
+    log_label: str = "webrtc controls",
+    payload_builder: Callable[[str, messaging.SubMaster], bytes] = cereal_message_payload,
   ):
     self.services = services
     self.channel = channel
     self.update_interval = update_interval
     self.log_interval = log_interval
     self.max_buffered_amount = max_buffered_amount
+    self.log_label = log_label
+    self.payload_builder = payload_builder
     self.sm = messaging.SubMaster(services)
     self.sent: dict[str, int] = dict.fromkeys(services, 0)
     self.skipped: dict[str, int] = dict.fromkeys(services, 0)
@@ -285,7 +366,7 @@ class CerealDataChannelSender:
         if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
           self.skipped[service] += 1
           continue
-        self.channel.send(cereal_message_payload(service, self.sm))
+        self.channel.send(self.payload_builder(service, self.sm))
         self.sent[service] += 1
 
       now = time.monotonic()
@@ -294,7 +375,7 @@ class CerealDataChannelSender:
         skipped_counts = " ".join(f"{service}={count}" for service, count in self.skipped.items())
         print(
           " ".join((
-            f"webrtc controls sent {sent_counts}",
+            f"{self.log_label} sent {sent_counts}",
             f"skipped {skipped_counts}",
             f"buffered={self.buffered_amount()}",
             f"buffered_max={self.max_observed_buffered_amount}",

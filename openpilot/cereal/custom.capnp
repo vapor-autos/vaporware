@@ -28,7 +28,15 @@ struct TurboSteerAssist @0xda96579883444c35 {
   baseModelLogMonoTime @5 :UInt64;
 }
 
-struct CustomReserved4 @0x80ae746ee2596b11 {
+struct TurboTeleopCommand @0x80ae746ee2596b11 {
+  command @0 :Command;
+
+  enum Command {
+    cruiseEnable @0;
+    cruiseCancel @1;
+    headlightsOn @2;
+    headlightsOff @3;
+  }
 }
 
 struct CustomReserved5 @0xa5cd762cd951a455 {

@@ -23,6 +23,12 @@ STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S = 180.0
 STEER_ASSIST_HAPTIC_FORCE = 0.4
 STEER_ASSIST_HAPTIC_FRICTION = 0.25
 STEER_ASSIST_METRICS_NAME = "g29-steer-assist"
+TELEOP_COMMAND_BY_CONTROL = {
+  "up": "headlightsOn",
+  "down": "headlightsOff",
+  "L3": "cruiseEnable",
+  "L2": "cruiseCancel",
+}
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -232,6 +238,19 @@ def _button_down_events(events: list[dict]) -> set[str]:
   return {event["control"] for event in events if event.get("type") == "button_down" and "control" in event}
 
 
+def _publish_teleop_command(sock, events: list[dict]) -> str | None:
+  button_down = _button_down_events(events)
+  command = next((command for control, command in TELEOP_COMMAND_BY_CONTROL.items() if control in button_down), None)
+  if command is None:
+    return None
+
+  msg = messaging.new_message("turboTeleopCommand")
+  msg.valid = True
+  msg.turboTeleopCommand.command = command
+  sock.send(msg.to_bytes())
+  return command
+
+
 def _publish_state(sock, state: dict, events: list[dict]) -> None:
   buttons = state["buttons"]
   button_down = _button_down_events(events)
@@ -322,7 +341,7 @@ def _make_assist_torque_controller(g29):
   return SteeringTorqueController(g29, config=config)
 
 
-def _run(g29_sock, steer_assist_sock) -> None:
+def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
   from g29py import G29
 
   g29 = None
@@ -514,6 +533,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
         )
 
       _publish_state(g29_sock, state, events)
+      _publish_teleop_command(teleop_command_sock, events)
       frame += 1
       rk.keep_time()
   finally:
@@ -525,10 +545,11 @@ def _run(g29_sock, steer_assist_sock) -> None:
 def main() -> None:
   g29_sock = messaging.pub_sock("g29")
   steer_assist_sock = messaging.pub_sock("turboSteerAssist")
+  teleop_command_sock = messaging.pub_sock("turboTeleopCommand")
 
   while True:
     try:
-      _run(g29_sock, steer_assist_sock)
+      _run(g29_sock, steer_assist_sock, teleop_command_sock)
     except KeyboardInterrupt:
       raise
     except Exception as e:

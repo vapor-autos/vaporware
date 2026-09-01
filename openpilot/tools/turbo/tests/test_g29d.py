@@ -12,6 +12,7 @@ from openpilot.tools.turbo.g29d import (
   SteerAssistNudgePublisher,
   _effect_position_to_steering_angle_deg,
   _make_assist_torque_controller,
+  _publish_teleop_command,
   _steering_angle_to_g29_target,
 )
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistInput
@@ -21,6 +22,34 @@ def test_steer_assist_service_is_logged_at_publish_rate():
   service = SERVICE_LIST["turboSteerAssist"]
   assert service.should_log
   assert service.frequency == PUBLISH_RATE_HZ
+
+
+def test_teleop_command_service_is_logged_as_event():
+  service = SERVICE_LIST["turboTeleopCommand"]
+  assert service.should_log
+  assert service.frequency == 0
+
+
+@pytest.mark.parametrize(("control", "expected"), (
+  ("L3", "cruiseEnable"),
+  ("L2", "cruiseCancel"),
+  ("up", "headlightsOn"),
+  ("down", "headlightsOff"),
+))
+def test_publish_teleop_command_uses_reliable_command_event(control, expected):
+  sock = FakeSocket()
+
+  assert _publish_teleop_command(sock, [{"type": "button_down", "control": control}]) == expected
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert msg.which() == "turboTeleopCommand"
+  assert str(msg.turboTeleopCommand.command) == expected
+
+
+def test_publish_teleop_command_ignores_non_command_events():
+  sock = FakeSocket()
+
+  assert _publish_teleop_command(sock, [{"type": "button_up", "control": "L3"}]) is None
+  assert sock.sent == []
 
 
 def test_steer_assist_controller_contracts_are_immutable():

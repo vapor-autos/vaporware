@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-from collections.abc import Callable
 from dataclasses import asdict
 import os
 import uuid
@@ -12,11 +11,15 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool
 from openpilot.tools.turbo.webrtc_client import parse_cameras, send_livestream_quality
 from openpilot.tools.turbo.webrtc_controls import (
+  CerealDatagramProtocol,
   CerealDataChannelReceiver,
   CerealDataChannelSender,
+  UdpCerealChannel,
   create_feedback_data_channel,
   expand_feedback_services,
   parse_control_services,
+  split_control_services,
+  udp_control_message_payload,
 )
 from openpilot.tools.turbo.webrtc_vipc_publisher import print_stats, publish_stream_to_vipc
 from teleoprtc import StreamingOffer, WebRTCOfferBuilder
@@ -63,17 +66,22 @@ class GcsAnswerProvider:
 
 
 class SignalingSession:
-  def __init__(self, args: argparse.Namespace, cameras: list[str]):
+  def __init__(self, args: argparse.Namespace, cameras: list[str], control_udp_endpoint: tuple[str, int] | None = None):
     self.args = args
     self.cameras = cameras
-    self.control_services = parse_control_services(args.control_services)
+    requested_control_services = parse_control_services(args.control_services)
+    self.control_udp_endpoint = control_udp_endpoint
+    self.control_udp_services, self.control_services = split_control_services(
+      requested_control_services,
+      udp_enabled=control_udp_endpoint is not None,
+    )
     self.feedback_services = expand_feedback_services(args.feedback_services, args.feedback_profile)
     self.session_id = uuid.uuid4().hex
     self.provider = GcsAnswerProvider(self.session_id, cameras, self.control_services, self.feedback_services)
     builder = WebRTCOfferBuilder(self.provider)
     for camera in cameras:
       builder.offer_to_receive_video_stream(camera)
-    if args.quality or self.control_services or self.feedback_services:
+    if args.quality or self.control_services or self.control_udp_services or self.feedback_services:
       builder.add_messaging()
     self.stream = builder.stream()
     self.feedback_receiver = CerealDataChannelReceiver(self.feedback_services) if self.feedback_services else None
@@ -98,15 +106,30 @@ class SignalingSession:
         print(f"feedback={','.join(self.feedback_services)}", flush=True)
 
       stats_task = None
-      controls_task = None
+      controls_tasks = []
+      control_udp_channel = None
       try:
         if self.control_services:
-          controls_task = asyncio.create_task(CerealDataChannelSender(
+          controls_tasks.append(asyncio.create_task(CerealDataChannelSender(
             self.control_services,
             self.stream.get_messaging_channel(),
             max_buffered_amount=self.args.control_max_buffered_amount,
-          ).run())
-          print(f"controls={','.join(self.control_services)}", flush=True)
+          ).run()))
+          print(f"controls_sctp={','.join(self.control_services)}", flush=True)
+        if self.control_udp_services:
+          assert self.control_udp_endpoint is not None
+          control_udp_channel = UdpCerealChannel(self.control_udp_endpoint)
+          controls_tasks.append(asyncio.create_task(CerealDataChannelSender(
+            self.control_udp_services,
+            control_udp_channel,
+            max_buffered_amount=0,
+            log_label="udp controls",
+            payload_builder=udp_control_message_payload,
+          ).run()))
+          print(
+            f"controls_udp={','.join(self.control_udp_services)} endpoint={self.control_udp_endpoint[0]}:{self.control_udp_endpoint[1]}",
+            flush=True,
+          )
         if self.args.stats:
           stats_task = asyncio.create_task(print_stats(self.stream, self.args.stats_interval, self.args.stats_file, self.args.stats_latest_file))
         await publish_stream_to_vipc(
@@ -118,9 +141,12 @@ class SignalingSession:
           self.args.log_interval,
         )
       finally:
-        if controls_task is not None:
+        for controls_task in controls_tasks:
           controls_task.cancel()
-          await asyncio.gather(controls_task, return_exceptions=True)
+        if controls_tasks:
+          await asyncio.gather(*controls_tasks, return_exceptions=True)
+        if control_udp_channel is not None:
+          control_udp_channel.close()
         if stats_task is not None:
           stats_task.cancel()
           await asyncio.gather(stats_task, return_exceptions=True)
@@ -146,41 +172,17 @@ class SignalingState:
     self.session: SignalingSession | None = None
     self.lock = asyncio.Lock()
 
-  async def get_session(self) -> SignalingSession:
+  async def get_session(self, control_udp_endpoint: tuple[str, int] | None = None) -> SignalingSession:
     async with self.lock:
       if self.session is None or self.session.task.done():
-        self.session = SignalingSession(self.args, self.cameras)
+        self.session = SignalingSession(self.args, self.cameras, control_udp_endpoint)
       return self.session
 
-  async def reset_session(self) -> SignalingSession:
+  async def reset_session(self) -> None:
     async with self.lock:
       if self.session is not None:
         await self.session.stop()
-      self.session = SignalingSession(self.args, self.cameras)
-      return self.session
-
-
-class FeedbackDatagramProtocol(asyncio.DatagramProtocol):
-  def __init__(self, receiver: Callable[[], CerealDataChannelReceiver | None]):
-    self.receiver = receiver
-    self.received_packets = 0
-    self.received_bytes = 0
-    self.ignored_packets = 0
-
-  def datagram_received(self, data: bytes, addr) -> None:
-    receiver = self.receiver()
-    if receiver is None:
-      self.ignored_packets += 1
-      return
-    try:
-      accepted = receiver.receive(data)
-    except (TypeError, ValueError):
-      accepted = False
-    if accepted:
-      self.received_packets += 1
-      self.received_bytes += len(data)
-    else:
-      self.ignored_packets += 1
+      self.session = None
 
 
 async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -189,7 +191,14 @@ async def handle_health(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
 async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
   state: SignalingState = request.app["state"]
-  session = await state.get_session()
+  try:
+    control_udp_port = int(request.query.get("control_udp_port", "0"))
+  except ValueError:
+    return aiohttp.web.json_response({"ok": False, "reason": "invalid_control_udp_port"}, status=400)
+  if not 0 <= control_udp_port <= 65535:
+    return aiohttp.web.json_response({"ok": False, "reason": "invalid_control_udp_port"}, status=400)
+  control_udp_endpoint = (request.remote, control_udp_port) if request.remote and control_udp_port else None
+  session = await state.get_session(control_udp_endpoint)
   try:
     await asyncio.wait_for(session.provider.offer_ready.wait(), timeout=10)
   except TimeoutError:
@@ -209,6 +218,7 @@ async def handle_offer(request: aiohttp.web.Request) -> aiohttp.web.Response:
 
   payload = asdict(session.provider.offer_body)
   payload["session_id"] = session.session_id
+  payload["control_udp_services"] = session.control_udp_services
   if state.feedback_udp_host:
     payload["feedback_udp_host"] = state.feedback_udp_host
     payload["feedback_udp_port"] = state.feedback_udp_port
@@ -266,7 +276,7 @@ async def run(args: argparse.Namespace) -> None:
   if state.feedback_udp_host:
     loop = asyncio.get_running_loop()
     feedback_udp_transport, _ = await loop.create_datagram_endpoint(
-      lambda: FeedbackDatagramProtocol(
+      lambda: CerealDatagramProtocol(
         lambda: state.session.feedback_receiver if state.session is not None else None,
       ),
       local_addr=(state.feedback_udp_host, state.feedback_udp_port),

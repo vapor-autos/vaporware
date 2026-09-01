@@ -3,6 +3,7 @@ import random
 
 import pytest
 
+from openpilot.cereal import messaging
 from openpilot.tools.turbo.webrtc_controls import (
   CerealDataChannelReceiver,
   FeedbackPacketReassembler,
@@ -11,6 +12,8 @@ from openpilot.tools.turbo.webrtc_controls import (
   expand_feedback_services,
   model_v2_ui_projection,
   parse_control_services,
+  split_control_services,
+  udp_control_message_payload,
 )
 
 
@@ -60,6 +63,46 @@ def test_parse_control_services_adds_derived_steer_assist_for_g29():
   assert parse_control_services("g29") == ["g29", "turboSteerAssist"]
   assert parse_control_services("g29,turboSteerAssist") == ["g29", "turboSteerAssist"]
   assert parse_control_services("testJoystick") == ["testJoystick"]
+
+
+def test_split_control_services_routes_latest_state_to_udp_and_commands_to_sctp():
+  services = parse_control_services("g29")
+
+  assert split_control_services(services, udp_enabled=True) == (
+    ["g29", "turboSteerAssist"],
+    ["turboTeleopCommand"],
+  )
+
+
+def test_split_control_services_falls_back_to_sctp_without_udp_endpoint():
+  services = parse_control_services("g29,testJoystick")
+
+  assert split_control_services(services, udp_enabled=False) == (
+    [],
+    ["g29", "testJoystick", "turboSteerAssist"],
+  )
+
+
+def test_udp_g29_projection_removes_reliable_button_edges():
+  class FakeSubMaster:
+    logMonoTime = {"g29": 123}
+    valid = {"g29": True}
+
+    def __getitem__(self, service):
+      assert service == "g29"
+      msg = messaging.new_message("g29").g29
+      msg.steering = 0.25
+      msg.accelerator = 0.5
+      msg.dpadUp = True
+      msg.l3 = True
+      return msg
+
+  payload = json.loads(udp_control_message_payload("g29", FakeSubMaster()))
+
+  assert payload["data"]["steering"] == pytest.approx(0.25)
+  assert payload["data"]["accelerator"] == pytest.approx(0.5)
+  assert not payload["data"]["dpadUp"]
+  assert not payload["data"]["l3"]
 
 
 def test_expand_feedback_services_accepts_explicit_services():
@@ -222,6 +265,20 @@ def test_cereal_data_channel_receiver_ignores_non_allowlisted_service():
 
   assert pm.sent == []
   assert receiver.ignored == 1
+
+
+def test_cereal_data_channel_receiver_rejects_out_of_order_message():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["carState"], pm=pm)
+
+  newer = {"type": "carState", "logMonoTime": 124, "valid": True, "data": {"vEgo": 4.25}}
+  older = {"type": "carState", "logMonoTime": 123, "valid": True, "data": {"vEgo": 1.0}}
+
+  assert receiver.receive(json.dumps(newer))
+  assert not receiver.receive(json.dumps(older))
+  assert len(pm.sent) == 1
+  assert pm.sent[0][1].carState.vEgo == 4.25
+  assert receiver.out_of_order == 1
 
 
 def test_model_v2_ui_projection_keeps_only_renderer_fields():
