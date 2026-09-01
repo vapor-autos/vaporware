@@ -174,10 +174,7 @@ def make_steer_assist_publisher(sock, **kwargs):
   options = {
     "tracking_duration_s": 0.0,
     "candidate_duration_s": 0.0,
-    "min_opposing_velocity_deg_s": 0.0,
-    "max_candidate_target_rate_deg_s": 1e6,
-    "max_target_step_deg": 1e6,
-    "max_target_rate_deg_s": 1e6,
+    "min_outward_velocity_deg_s": 0.0,
     "wheel_velocity_tau_s": 0.0,
     "override_slew_rate_deg_s": float("inf"),
   }
@@ -476,13 +473,20 @@ def test_steer_assist_nudge_publisher_acquires_within_neutral_deadband():
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
+def test_steer_assist_nudge_publisher_does_not_arm_from_preexisting_hold():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock, tracking_duration_s=0.3, min_outward_velocity_deg_s=10.0)
+
+  publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.5)
+
+  assert publisher.last_decision.tracking_status == "disarmed"
+  assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
+
+
 def test_steer_assist_nudge_publisher_acquires_while_haptic_target_moves():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(
-    sock,
-    tracking_duration_s=0.3,
-    max_candidate_target_rate_deg_s=60.0,
-  )
+  publisher = make_steer_assist_publisher(sock, tracking_duration_s=0.3)
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": -10.0 / 180.0}, -10.0 / 180.0, 10.0, 10.0, now=10.1)
@@ -498,11 +502,7 @@ def test_steer_assist_nudge_publisher_acquires_while_haptic_target_moves():
 
 def test_steer_assist_nudge_publisher_does_not_treat_haptic_lag_as_override():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(
-    sock,
-    max_candidate_target_rate_deg_s=60.0,
-    min_opposing_velocity_deg_s=10.0,
-  )
+  publisher = make_steer_assist_publisher(sock, min_outward_velocity_deg_s=10.0)
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": -2.0 / 180.0}, -10.0 / 180.0, 10.0, 10.0, now=10.02)
@@ -514,14 +514,15 @@ def test_steer_assist_nudge_publisher_does_not_treat_haptic_lag_as_override():
   assert not msg.turboSteerAssist.active
   assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(0.0)
 
-  publisher.update({"steering": -6.0 / 180.0}, -10.0 / 180.0, 10.0, 10.0, now=10.04)
+  publisher.update({"steering": -12.0 / 180.0}, -20.0 / 180.0, 20.0, 20.0, now=10.04)
+  assert publisher.last_decision.residual_angle_deg == pytest.approx(-8.0)
   assert publisher.last_decision.tracking_status == "tracking"
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
-def test_steer_assist_nudge_publisher_requires_opposing_motion():
+def test_steer_assist_nudge_publisher_requires_outward_wheel_motion():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(sock, max_candidate_target_rate_deg_s=60.0)
+  publisher = make_steer_assist_publisher(sock)
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=0.0)
   publisher.update(
@@ -545,59 +546,53 @@ def test_steer_assist_nudge_publisher_requires_opposing_motion():
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
-def test_steer_assist_nudge_publisher_pauses_candidate_during_target_motion():
+def test_steer_assist_nudge_publisher_confirms_candidate_across_target_motion():
   sock = FakeSocket()
   publisher = make_steer_assist_publisher(
     sock,
     candidate_duration_s=0.08,
-    max_candidate_target_rate_deg_s=60.0,
-    min_opposing_velocity_deg_s=10.0,
+    min_outward_velocity_deg_s=10.0,
   )
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
-  publisher.update({"steering": -7.0 / 180.0}, 0.0, 0.0, 0.0, now=10.04)
   assert publisher.last_decision.tracking_status == "candidate"
-  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.02)
+  assert publisher.last_decision.candidate_reference_angle_deg == pytest.approx(0.0)
 
-  publisher.update({"steering": -8.0 / 180.0}, -2.0 / 180.0, 2.0, 2.0, now=10.06)
-  assert publisher.last_decision.haptic_target_rate_deg_s == pytest.approx(100.0)
+  publisher.update({"steering": -7.0 / 180.0}, -40.0 / 180.0, 40.0, 40.0, now=10.06)
+  assert publisher.last_decision.haptic_target_rate_deg_s == pytest.approx(1000.0)
   assert publisher.last_decision.tracking_status == "candidate"
-  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.02)
-
-  publisher.update({"steering": -9.0 / 180.0}, -2.0 / 180.0, 2.0, 2.0, now=10.08)
-  publisher.update({"steering": -10.0 / 180.0}, -2.0 / 180.0, 2.0, 2.0, now=10.10)
-  publisher.update({"steering": -11.0 / 180.0}, -2.0 / 180.0, 2.0, 2.0, now=10.12)
-  assert publisher.last_decision.tracking_status == "candidate"
+  assert publisher.last_decision.candidate_reference_angle_deg == pytest.approx(0.0)
+  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.04)
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
-  publisher.update({"steering": -12.0 / 180.0}, -2.0 / 180.0, 2.0, 2.0, now=10.14)
+  publisher.update({"steering": -7.0 / 180.0}, 30.0 / 180.0, -30.0, -30.0, now=10.11)
   msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_decision.tracking_status == "override"
-  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.1)
+  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.09)
+  assert publisher.last_decision.candidate_reference_angle_deg == pytest.approx(0.0)
   assert msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(12.0)
+  assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(7.0)
 
 
-def test_steer_assist_nudge_publisher_pauses_candidate_without_relative_motion():
+def test_steer_assist_nudge_publisher_confirms_move_and_hold():
   sock = FakeSocket()
   publisher = make_steer_assist_publisher(
     sock,
     candidate_duration_s=0.08,
-    max_candidate_target_rate_deg_s=60.0,
-    min_opposing_velocity_deg_s=10.0,
+    min_outward_velocity_deg_s=10.0,
   )
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
-  publisher.update({"steering": -7.0 / 180.0}, 0.0, 0.0, 0.0, now=10.04)
   assert publisher.last_decision.tracking_status == "candidate"
-  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.02)
 
-  publisher.update({"steering": -7.0 / 180.0}, 0.0, 0.0, 0.0, now=10.20)
-  assert publisher.last_decision.tracking_status == "candidate"
-  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.02)
-  assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.11)
+  msg = messaging.log_from_bytes(sock.sent[-1])
+  assert publisher.last_decision.tracking_status == "override"
+  assert publisher.last_decision.candidate_evidence_s == pytest.approx(0.09)
+  assert msg.turboSteerAssist.active
+  assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(0.624)
 
 
 def test_steer_assist_nudge_publisher_latches_and_releases_override():
@@ -762,39 +757,27 @@ def test_steer_assist_nudge_publisher_cancels_candidate_when_spring_recovers():
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
-def test_steer_assist_nudge_publisher_disarms_on_model_jump_until_wheel_tracks():
+def test_steer_assist_nudge_publisher_preserves_tracking_across_model_jump():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(
-    sock,
-    tracking_duration_s=0.3,
-    max_target_step_deg=15.0,
-    max_target_rate_deg_s=300.0,
-  )
+  publisher = make_steer_assist_publisher(sock, tracking_duration_s=0.3)
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.31)
   assert publisher.last_decision.tracking_status == "tracking"
 
   publisher.update({"steering": 0.0}, -100.0 / 180.0, 100.0, 18.0, now=10.41)
-  assert publisher.last_decision.tracking_status == "target_unstable"
+  assert publisher.last_decision.target_step_deg == pytest.approx(100.0)
+  assert publisher.last_decision.tracking_status == "tracking"
   assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
   publisher.update({"steering": 0.0}, -100.0 / 180.0, 100.0, 90.0, now=11.0)
-  assert publisher.last_decision.tracking_status == "disarmed"
-  publisher.update({"steering": -0.5}, -100.0 / 180.0, 100.0, 90.0, now=12.0)
-  assert publisher.last_decision.tracking_status == "acquiring_tracking"
-  publisher.update({"steering": -0.5}, -100.0 / 180.0, 100.0, 90.0, now=12.31)
   assert publisher.last_decision.tracking_status == "tracking"
+  assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
 
 
 def test_steer_assist_nudge_publisher_preserves_blended_target_across_model_jump():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(
-    sock,
-    candidate_duration_s=0.08,
-    max_target_step_deg=15.0,
-    max_target_rate_deg_s=300.0,
-  )
+  publisher = make_steer_assist_publisher(sock, candidate_duration_s=0.08)
 
   publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
   publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
@@ -913,7 +896,7 @@ def test_steer_assist_nudge_publisher_encodes_absolute_target_at_steering_limit(
 
 def test_steer_assist_nudge_publisher_uses_source_timestamp_for_target_rate():
   sock = FakeSocket()
-  publisher = make_steer_assist_publisher(sock, max_target_step_deg=15.0, max_target_rate_deg_s=300.0)
+  publisher = make_steer_assist_publisher(sock)
 
   publisher.update(
     {"steering": 0.0},
@@ -934,7 +917,7 @@ def test_steer_assist_nudge_publisher_uses_source_timestamp_for_target_rate():
 
   assert publisher.last_decision.target_interval_s == pytest.approx(0.05)
   assert publisher.last_decision.target_rate_deg_s == pytest.approx(175.6)
-  assert publisher.last_decision.tracking_status != "target_unstable"
+  assert publisher.last_decision.tracking_status == "tracking"
 
 
 def test_steer_assist_nudge_publisher_preserves_tracking_but_publishes_inactive_when_stale():

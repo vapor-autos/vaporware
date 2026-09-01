@@ -18,11 +18,8 @@ class SteerAssistConfig:
   full_assist_error_deg: float = DEFAULT_FULL_ASSIST_ERROR_DEG
   tracking_error_deg: float = 5.0
   tracking_duration_s: float = 0.3
-  min_opposing_velocity_deg_s: float = 10.0
+  min_outward_velocity_deg_s: float = 10.0
   candidate_duration_s: float = 0.08
-  max_candidate_target_rate_deg_s: float = 60.0
-  max_target_step_deg: float = 15.0
-  max_target_rate_deg_s: float = 300.0
   wheel_velocity_tau_s: float = 0.06
   override_slew_rate_deg_s: float = 180.0
   release_duration_s: float = 0.2
@@ -32,11 +29,8 @@ class SteerAssistConfig:
     nonnegative_fields = (
       "tracking_error_deg",
       "tracking_duration_s",
-      "min_opposing_velocity_deg_s",
+      "min_outward_velocity_deg_s",
       "candidate_duration_s",
-      "max_candidate_target_rate_deg_s",
-      "max_target_step_deg",
-      "max_target_rate_deg_s",
       "wheel_velocity_tau_s",
       "override_slew_rate_deg_s",
       "release_duration_s",
@@ -83,6 +77,7 @@ class SteerAssistDecision:
   target_interval_s: float | None
   haptic_target_rate_deg_s: float
   candidate_evidence_s: float
+  candidate_reference_angle_deg: float | None
   release_since: float | None
   release_evidence_s: float
 
@@ -104,9 +99,10 @@ class SteerAssistController:
     self._last_update_time: float | None = None
     self._last_motion_wheel_angle_deg: float | None = None
     self._tracking_since: float | None = None
-    self._candidate_last_update_time: float | None = None
+    self._candidate_since: float | None = None
     self._candidate_evidence_s = 0.0
     self._candidate_error_sign = 0.0
+    self._candidate_reference_angle_deg: float | None = None
     self._release_since: float | None = None
     self._release_evidence_s = 0.0
     self._override_slew_last_update_time: float | None = None
@@ -139,9 +135,15 @@ class SteerAssistController:
     )
 
     if requested_active and input_data.fresh:
-      target_unstable = self._update_motion(input_data)
+      self._update_motion(input_data)
       model_haptic_aligned = abs(model_haptic_delta_deg) <= self.config.tracking_error_deg
-      self._update_detection(residual_angle_deg, target_unstable, model_haptic_aligned, input_data.now)
+      self._update_detection(
+        input_data.wheel_angle_deg,
+        input_data.haptic_target_angle_deg,
+        residual_angle_deg,
+        model_haptic_aligned,
+        input_data.now,
+      )
     elif requested_active:
       self._hold_detection_for_stale_target(input_data.now)
     else:
@@ -211,14 +213,16 @@ class SteerAssistController:
       target_interval_s=self._target_interval_s,
       haptic_target_rate_deg_s=self._haptic_target_rate_deg_s,
       candidate_evidence_s=self._candidate_evidence_s,
+      candidate_reference_angle_deg=self._candidate_reference_angle_deg,
       release_since=self._release_since,
       release_evidence_s=self._release_evidence_s,
     )
 
   def _clear_candidate(self) -> None:
-    self._candidate_last_update_time = None
+    self._candidate_since = None
     self._candidate_evidence_s = 0.0
     self._candidate_error_sign = 0.0
+    self._candidate_reference_angle_deg = None
 
   def _clear_release_candidate(self) -> None:
     self._release_since = None
@@ -247,7 +251,7 @@ class SteerAssistController:
     self._target_interval_s = None
     self._haptic_target_rate_deg_s = 0.0
 
-  def _update_motion(self, input_data: SteerAssistInput) -> bool:
+  def _update_motion(self, input_data: SteerAssistInput) -> None:
     model_target_angle_deg = float(input_data.model_target_angle_deg)
     if self._last_update_time is None or input_data.now <= self._last_update_time:
       self._reset_motion()
@@ -256,7 +260,7 @@ class SteerAssistController:
       self._last_model_target_angle_deg = model_target_angle_deg
       self._last_model_target_log_mono_time = input_data.base_target_log_mono_time
       self._last_haptic_target_angle_deg = input_data.haptic_target_angle_deg
-      return False
+      return
 
     dt = input_data.now - self._last_update_time
     raw_wheel_velocity_deg_s = (input_data.wheel_angle_deg - self._last_motion_wheel_angle_deg) / dt
@@ -264,7 +268,6 @@ class SteerAssistController:
     self._wheel_velocity_deg_s += (raw_wheel_velocity_deg_s - self._wheel_velocity_deg_s) * alpha
 
     self._target_step_deg = model_target_angle_deg - self._last_model_target_angle_deg
-    target_timestamp_invalid = False
     if input_data.base_target_log_mono_time > 0 and self._last_model_target_log_mono_time > 0:
       target_interval_s = (input_data.base_target_log_mono_time - self._last_model_target_log_mono_time) / 1e9
       self._target_interval_s = target_interval_s
@@ -274,7 +277,6 @@ class SteerAssistController:
         self._target_rate_deg_s = 0.0
       else:
         self._target_rate_deg_s = self._target_step_deg / dt
-        target_timestamp_invalid = True
     else:
       self._target_interval_s = dt
       self._target_rate_deg_s = self._target_step_deg / dt
@@ -286,11 +288,6 @@ class SteerAssistController:
     self._last_model_target_angle_deg = model_target_angle_deg
     self._last_model_target_log_mono_time = input_data.base_target_log_mono_time
     self._last_haptic_target_angle_deg = input_data.haptic_target_angle_deg
-    return (
-      target_timestamp_invalid
-      or abs(self._target_step_deg) > self.config.max_target_step_deg
-      or abs(self._target_rate_deg_s) > self.config.max_target_rate_deg_s
-    )
 
   def _hold_detection_for_stale_target(self, now: float) -> None:
     self._clear_release_candidate()
@@ -302,17 +299,13 @@ class SteerAssistController:
 
   def _update_detection(
     self,
+    wheel_angle_deg: float,
+    haptic_target_angle_deg: float,
     error_deg: float,
-    target_unstable: bool,
     model_haptic_aligned: bool,
     now: float,
   ) -> None:
-    target_rate_deg_s = self._haptic_target_rate_deg_s
     relative_velocity_deg_s = self._relative_velocity_deg_s
-
-    if target_unstable and self._tracking_status != "override":
-      self._reset_detection("target_unstable")
-      return
 
     if self._tracking_status not in ("tracking", "candidate", "override"):
       if abs(error_deg) > self.config.tracking_error_deg:
@@ -326,39 +319,30 @@ class SteerAssistController:
       self._tracking_status = "tracking"
 
     if self._tracking_status == "tracking":
-      opposing = (
+      moving_outward = (
         abs(error_deg) > self.config.inner_deadband_deg
-        and abs(target_rate_deg_s) <= self.config.max_candidate_target_rate_deg_s
-        and abs(relative_velocity_deg_s) >= self.config.min_opposing_velocity_deg_s
-        and error_deg * relative_velocity_deg_s > 0.0
+        and abs(self._wheel_velocity_deg_s) >= self.config.min_outward_velocity_deg_s
+        and error_deg * self._wheel_velocity_deg_s > 0.0
       )
-      if opposing:
+      if moving_outward:
         self._tracking_status = "candidate"
-        self._candidate_last_update_time = now
+        self._candidate_since = now
         self._candidate_evidence_s = 0.0
         self._candidate_error_sign = math.copysign(1.0, error_deg)
+        self._candidate_reference_angle_deg = haptic_target_angle_deg
 
     if self._tracking_status == "candidate":
-      candidate_dt = max(0.0, now - self._candidate_last_update_time) if self._candidate_last_update_time is not None else 0.0
-      self._candidate_last_update_time = now
-      error_sign_changed = error_deg == 0.0 or math.copysign(1.0, error_deg) != self._candidate_error_sign
-      target_stable = abs(target_rate_deg_s) <= self.config.max_candidate_target_rate_deg_s
-      moving_away_from_spring = (
-        target_stable
-        and abs(relative_velocity_deg_s) >= self.config.min_opposing_velocity_deg_s
-        and error_deg * relative_velocity_deg_s > 0.0
-      )
-      moving_with_spring = (
-        target_stable
-        and abs(relative_velocity_deg_s) >= self.config.min_opposing_velocity_deg_s
-        and error_deg * relative_velocity_deg_s < 0.0
-      )
-      if abs(error_deg) <= self.config.inner_deadband_deg or error_sign_changed or moving_with_spring:
+      if self._candidate_since is None or self._candidate_reference_angle_deg is None:
         self._tracking_status = "tracking"
         self._clear_candidate()
-      elif moving_away_from_spring:
-        self._candidate_evidence_s += candidate_dt
-        if self._candidate_evidence_s >= self.config.candidate_duration_s:
+      else:
+        candidate_error_deg = wheel_angle_deg - self._candidate_reference_angle_deg
+        error_sign_changed = candidate_error_deg == 0.0 or math.copysign(1.0, candidate_error_deg) != self._candidate_error_sign
+        self._candidate_evidence_s = max(0.0, now - self._candidate_since)
+        if abs(candidate_error_deg) <= self.config.inner_deadband_deg or error_sign_changed:
+          self._tracking_status = "tracking"
+          self._clear_candidate()
+        elif self._candidate_evidence_s >= self.config.candidate_duration_s:
           self._tracking_status = "override"
 
     if self._tracking_status == "override":
