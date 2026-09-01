@@ -17,8 +17,10 @@ from openpilot.tools.turbo.g29d import (
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistInput
 
 
-def test_steer_assist_service_matches_publish_rate():
-  assert SERVICE_LIST["turboSteerAssist"].frequency == PUBLISH_RATE_HZ
+def test_steer_assist_service_is_logged_at_publish_rate():
+  service = SERVICE_LIST["turboSteerAssist"]
+  assert service.should_log
+  assert service.frequency == PUBLISH_RATE_HZ
 
 
 def test_steer_assist_controller_contracts_are_immutable():
