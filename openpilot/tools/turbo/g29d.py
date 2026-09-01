@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from dataclasses import dataclass
 import math
 import time
 
@@ -108,6 +109,19 @@ class SpeedSource:
     return _accelerator_to_simulated_velocity_m_s(state["accelerator"], TORQUE_SIM_MAX_VELOCITY_M_S), "pedal"
 
 
+@dataclass(frozen=True)
+class AssistFeedback:
+  model_angle_deg: float | None
+  model_log_mono_time: int
+  fresh: bool
+  engaged: bool
+  source: str
+  controlsstate_age_s: float | None
+  caroutput_age_s: float | None
+  selfdrive_age_s: float | None
+  applied_angle_deg: float | None
+
+
 class AssistTargetSource:
   def __init__(
     self,
@@ -118,83 +132,107 @@ class AssistTargetSource:
     self.sm = messaging.SubMaster(["controlsState", "selfdriveState", "carOutput"]) if sm is None else sm
     self.stale_timeout_s = stale_timeout_s
     self.stale_grace_s = max(0.0, stale_grace_s)
-    self.last_controlsstate_age_s: float | None = None
-    self.last_caroutput_age_s: float | None = None
-    self.last_selfdrive_age_s: float | None = None
-    self.last_target_angle_deg: float | None = None
-    self.last_target_log_mono_time = 0
-    self.last_target_fresh = False
-    self.last_applied_angle_deg: float | None = None
     self._cached_target_angle_deg: float | None = None
     self._cached_target_log_mono_time = 0
 
-  def update(self, now: float | None = None) -> tuple[float | None, str]:
+  def update(self, now: float | None = None) -> AssistFeedback:
     self.sm.update(0)
     now = time.monotonic() if now is None else now
-    self.last_controlsstate_age_s = self._age("controlsState", now)
-    self.last_caroutput_age_s = self._age("carOutput", now)
-    self.last_selfdrive_age_s = self._age("selfdriveState", now)
-    self.last_target_angle_deg = None
-    self.last_target_log_mono_time = 0
-    self.last_target_fresh = False
-    self.last_applied_angle_deg = self._applied_angle_deg()
+    ages = {service: self._age(service, now) for service in ("controlsState", "carOutput", "selfdriveState")}
+    applied_angle_deg = self._applied_angle_deg()
+    engaged = self._engaged()
 
-    if not self._fresh("selfdriveState"):
-      return self._stale_target("selfdriveState_stale")
+    if not self._fresh("selfdriveState", ages["selfdriveState"]):
+      return self._stale_feedback("selfdriveState_stale", ages, applied_angle_deg, engaged)
 
-    selfdrive_state = self.sm["selfdriveState"]
-    if not (bool(selfdrive_state.enabled) or bool(selfdrive_state.active)):
+    if not engaged:
       self._clear_cached_target()
-      return None, "disengaged"
+      return self._feedback("disengaged", ages, applied_angle_deg, engaged)
 
-    if not self._fresh("controlsState"):
-      return self._stale_target("controlsState_stale")
+    if not self._fresh("controlsState", ages["controlsState"]):
+      return self._stale_feedback("controlsState_stale", ages, applied_angle_deg, engaged)
 
     controls_state = self.sm["controlsState"]
     lateral_state = controls_state.lateralControlState
     if lateral_state.which() != "angleState":
       self._clear_cached_target()
-      return None, "controlsState_not_angle"
+      return self._feedback("controlsState_not_angle", ages, applied_angle_deg, engaged)
 
     angle_deg = float(lateral_state.angleState.steeringAngleDesiredDeg)
-    self.last_target_angle_deg = angle_deg
-    self.last_target_log_mono_time = int(self.sm.logMonoTime["controlsState"])
-    self.last_target_fresh = True
+    model_log_mono_time = int(self.sm.logMonoTime["controlsState"])
     self._cached_target_angle_deg = angle_deg
-    self._cached_target_log_mono_time = self.last_target_log_mono_time
-    return _steering_angle_to_g29_target(angle_deg), "controlsState"
+    self._cached_target_log_mono_time = model_log_mono_time
+    return self._feedback(
+      "controlsState",
+      ages,
+      applied_angle_deg,
+      engaged,
+      model_angle_deg=angle_deg,
+      model_log_mono_time=model_log_mono_time,
+      fresh=True,
+    )
 
   def _clear_cached_target(self) -> None:
     self._cached_target_angle_deg = None
     self._cached_target_log_mono_time = 0
 
-  def _stale_target(self, reason: str) -> tuple[float | None, str]:
+  def _stale_feedback(
+    self,
+    reason: str,
+    ages: dict[str, float | None],
+    applied_angle_deg: float | None,
+    engaged: bool,
+  ) -> AssistFeedback:
     services = ("selfdriveState", "controlsState")
-    ages = (self.last_selfdrive_age_s, self.last_controlsstate_age_s)
     stale_limit_s = self.stale_timeout_s + self.stale_grace_s
     valid_feedback = all(self.sm.seen[service] and self.sm.valid[service] for service in services)
-    within_grace = all(age is not None and age <= stale_limit_s for age in ages)
-    selfdrive_state = self.sm["selfdriveState"]
-    last_engaged = bool(selfdrive_state.enabled) or bool(selfdrive_state.active)
-    if self._cached_target_angle_deg is None or not valid_feedback or not within_grace or not last_engaged:
+    within_grace = all(ages[service] is not None and ages[service] <= stale_limit_s for service in services)
+    if self._cached_target_angle_deg is None or not valid_feedback or not within_grace or not engaged:
       self._clear_cached_target()
-      return None, reason
+      return self._feedback(reason, ages, applied_angle_deg, engaged)
 
-    self.last_target_angle_deg = self._cached_target_angle_deg
-    self.last_target_log_mono_time = self._cached_target_log_mono_time
-    return _steering_angle_to_g29_target(self.last_target_angle_deg), "feedback_stale_hold"
+    return self._feedback(
+      "feedback_stale_hold",
+      ages,
+      applied_angle_deg,
+      engaged,
+      model_angle_deg=self._cached_target_angle_deg,
+      model_log_mono_time=self._cached_target_log_mono_time,
+    )
+
+  @staticmethod
+  def _feedback(
+    source: str,
+    ages: dict[str, float | None],
+    applied_angle_deg: float | None,
+    engaged: bool,
+    model_angle_deg: float | None = None,
+    model_log_mono_time: int = 0,
+    fresh: bool = False,
+  ) -> AssistFeedback:
+    return AssistFeedback(
+      model_angle_deg=model_angle_deg,
+      model_log_mono_time=model_log_mono_time,
+      fresh=fresh,
+      engaged=engaged,
+      source=source,
+      controlsstate_age_s=ages["controlsState"],
+      caroutput_age_s=ages["carOutput"],
+      selfdrive_age_s=ages["selfdriveState"],
+      applied_angle_deg=applied_angle_deg,
+    )
 
   def _age(self, service: str, now: float) -> float | None:
     return now - self.sm.recv_time[service] if self.sm.seen[service] else None
 
-  def _fresh(self, service: str) -> bool:
-    ages = {
-      "selfdriveState": self.last_selfdrive_age_s,
-      "controlsState": self.last_controlsstate_age_s,
-      "carOutput": self.last_caroutput_age_s,
-    }
-    age = ages[service]
+  def _fresh(self, service: str, age: float | None) -> bool:
     return self.sm.seen[service] and self.sm.valid[service] and age is not None and age <= self.stale_timeout_s
+
+  def _engaged(self) -> bool:
+    if not self.sm.seen["selfdriveState"] or not self.sm.valid["selfdriveState"]:
+      return False
+    selfdrive_state = self.sm["selfdriveState"]
+    return bool(selfdrive_state.enabled) or bool(selfdrive_state.active)
 
   def _applied_angle_deg(self) -> float | None:
     if not self.sm.seen["carOutput"] or not self.sm.valid["carOutput"]:
@@ -666,10 +704,12 @@ def _run(g29_sock, steer_assist_sock) -> None:
       events = g29.get_events()
 
       velocity, speed_source_name = speed_source.update(state, now=now)
-      target_steering, assist_target_name = assist_target_source.update(now=now)
+      assist_feedback = assist_target_source.update(now=now)
+      target_angle = assist_feedback.model_angle_deg
+      target_steering = None if target_angle is None else _steering_angle_to_g29_target(target_angle)
       wheel_angle_deg = g29_steering_to_angle_deg(float(state["steering"]))
       limited_target_angle_deg = haptic_target_limiter.update(
-        assist_target_source.last_target_angle_deg,
+        target_angle,
         wheel_angle_deg,
         now=now,
       )
@@ -684,27 +724,27 @@ def _run(g29_sock, steer_assist_sock) -> None:
       assist_published = steer_assist_publisher.update(
         state,
         target_steering,
-        assist_target_source.last_target_angle_deg,
+        target_angle,
         haptic_target_angle_deg,
-        base_target_log_mono_time=assist_target_source.last_target_log_mono_time,
-        input_fresh=assist_target_source.last_target_fresh,
+        base_target_log_mono_time=assist_feedback.model_log_mono_time,
+        input_fresh=assist_feedback.fresh,
         now=now,
       )
 
       carstate_age = speed_source.last_carstate_age_s
-      controlsstate_age = assist_target_source.last_controlsstate_age_s
-      caroutput_age = assist_target_source.last_caroutput_age_s
-      selfdrive_age = assist_target_source.last_selfdrive_age_s
-      target_angle = assist_target_source.last_target_angle_deg
-      applied_angle = assist_target_source.last_applied_angle_deg
+      controlsstate_age = assist_feedback.controlsstate_age_s
+      caroutput_age = assist_feedback.caroutput_age_s
+      selfdrive_age = assist_feedback.selfdrive_age_s
+      applied_angle = assist_feedback.applied_angle_deg
 
       if assist_published and frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
         write_metrics_payload(
           {
             "steer_assist": {
               "requested_active": target_steering is not None,
-              "target_source": assist_target_name,
-              "target_fresh": assist_target_source.last_target_fresh,
+              "engaged": assist_feedback.engaged,
+              "target_source": assist_feedback.source,
+              "target_fresh": assist_feedback.fresh,
               "stale_grace_s": TORQUE_SIM_ASSIST_STALE_GRACE_S,
               "active": steer_assist_publisher.last_active,
               "tracking_status": steer_assist_publisher.last_tracking_status,
@@ -735,7 +775,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
               "caroutput_age_s": caroutput_age,
               "selfdrive_age_s": selfdrive_age,
               "model_target_angle_deg": target_angle,
-              "base_target_log_mono_time": assist_target_source.last_target_log_mono_time,
+              "base_target_log_mono_time": assist_feedback.model_log_mono_time,
               "applied_angle_deg": applied_angle,
               "haptic_target_angle_deg": haptic_target_angle_deg,
               "wheel_angle_deg": steer_assist_publisher.last_wheel_angle_deg,
@@ -768,7 +808,7 @@ def _run(g29_sock, steer_assist_sock) -> None:
             (
               "g29d torque_sim",
               f"speed_source={speed_source_name}",
-              f"assist_target={assist_target_name}",
+              f"assist_target={assist_feedback.source}",
               f"velocity={velocity:.2f}m/s",
               f"carstate_age={carstate_age_text}",
               f"controlsstate_age={controlsstate_age_text}",

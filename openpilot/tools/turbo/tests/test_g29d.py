@@ -1,3 +1,5 @@
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from openpilot.cereal import messaging
@@ -257,18 +259,20 @@ def test_assist_target_source_uses_fresh_engaged_controlsstate_target():
   )
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
 
-  target, name = source.update(now=10.1)
+  feedback = source.update(now=10.1)
 
-  assert target == pytest.approx(-0.25)
-  assert name == "controlsState"
-  assert source.last_controlsstate_age_s == pytest.approx(0.1)
-  assert source.last_caroutput_age_s == pytest.approx(0.1)
-  assert source.last_selfdrive_age_s == pytest.approx(0.1)
-  assert source.last_target_angle_deg == pytest.approx(45.0)
-  assert source.last_target_log_mono_time == 10_000_000_000
-  assert source.last_target_fresh
-  assert source.last_applied_angle_deg == pytest.approx(12.0)
+  assert feedback.model_angle_deg == pytest.approx(45.0)
+  assert feedback.model_log_mono_time == 10_000_000_000
+  assert feedback.fresh
+  assert feedback.engaged
+  assert feedback.source == "controlsState"
+  assert feedback.controlsstate_age_s == pytest.approx(0.1)
+  assert feedback.caroutput_age_s == pytest.approx(0.1)
+  assert feedback.selfdrive_age_s == pytest.approx(0.1)
+  assert feedback.applied_angle_deg == pytest.approx(12.0)
   assert sm.update_count == 1
+  with pytest.raises(FrozenInstanceError):
+    feedback.source = "modified"
 
 
 def test_assist_target_source_falls_back_when_disengaged():
@@ -289,12 +293,13 @@ def test_assist_target_source_falls_back_when_disengaged():
   )
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
 
-  target, name = source.update(now=10.1)
+  feedback = source.update(now=10.1)
 
-  assert target is None
-  assert name == "disengaged"
-  assert source.last_target_angle_deg is None
-  assert source.last_target_log_mono_time == 0
+  assert feedback.model_angle_deg is None
+  assert feedback.model_log_mono_time == 0
+  assert not feedback.fresh
+  assert not feedback.engaged
+  assert feedback.source == "disengaged"
 
 
 def test_assist_target_source_falls_back_when_controlsstate_is_stale():
@@ -314,10 +319,11 @@ def test_assist_target_source_falls_back_when_controlsstate_is_stale():
   )
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
 
-  target, name = source.update(now=10.3)
+  feedback = source.update(now=10.3)
 
-  assert target is None
-  assert name == "controlsState_stale"
+  assert feedback.model_angle_deg is None
+  assert feedback.engaged
+  assert feedback.source == "controlsState_stale"
 
 
 def test_assist_target_source_falls_back_when_controlsstate_is_not_angle():
@@ -333,10 +339,11 @@ def test_assist_target_source_falls_back_when_controlsstate_is_not_angle():
   )
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
 
-  target, name = source.update(now=10.1)
+  feedback = source.update(now=10.1)
 
-  assert target is None
-  assert name == "controlsState_not_angle"
+  assert feedback.model_angle_deg is None
+  assert feedback.engaged
+  assert feedback.source == "controlsState_not_angle"
 
 
 def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
@@ -356,10 +363,11 @@ def test_assist_target_source_falls_back_when_selfdrive_state_is_stale():
   )
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25)
 
-  target, name = source.update(now=10.3)
+  feedback = source.update(now=10.3)
 
-  assert target is None
-  assert name == "selfdriveState_stale"
+  assert feedback.model_angle_deg is None
+  assert feedback.engaged
+  assert feedback.source == "selfdriveState_stale"
 
 
 def test_assist_target_source_holds_last_target_during_brief_feedback_staleness():
@@ -377,19 +385,18 @@ def test_assist_target_source_holds_last_target_during_brief_feedback_staleness(
   source = AssistTargetSource(sm=sm, stale_timeout_s=0.25, stale_grace_s=0.15)
   source.update(now=10.1)
 
-  target, name = source.update(now=10.3)
+  feedback = source.update(now=10.3)
 
-  assert target == pytest.approx(-0.25)
-  assert name == "feedback_stale_hold"
-  assert source.last_target_angle_deg == pytest.approx(45.0)
-  assert source.last_target_log_mono_time == 10_000_000_000
-  assert not source.last_target_fresh
+  assert feedback.model_angle_deg == pytest.approx(45.0)
+  assert feedback.model_log_mono_time == 10_000_000_000
+  assert not feedback.fresh
+  assert feedback.engaged
+  assert feedback.source == "feedback_stale_hold"
 
-  target, name = source.update(now=10.41)
+  feedback = source.update(now=10.41)
 
-  assert target is None
-  assert name == "selfdriveState_stale"
-  assert source.last_target_angle_deg is None
+  assert feedback.model_angle_deg is None
+  assert feedback.source == "selfdriveState_stale"
 
 
 def test_assist_target_source_clears_held_target_on_fresh_disengagement():
@@ -408,11 +415,11 @@ def test_assist_target_source_clears_held_target_on_fresh_disengagement():
   sm.data["selfdriveState"].enabled = False
   sm.recv_time["selfdriveState"] = 10.2
 
-  target, name = source.update(now=10.21)
+  feedback = source.update(now=10.21)
 
-  assert target is None
-  assert name == "disengaged"
-  assert source.last_target_angle_deg is None
+  assert feedback.model_angle_deg is None
+  assert not feedback.engaged
+  assert feedback.source == "disengaged"
 
 
 def test_steer_assist_nudge_publisher_arms_after_measured_tracking():
