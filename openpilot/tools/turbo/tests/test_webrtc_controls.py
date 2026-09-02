@@ -3,14 +3,17 @@ import random
 
 import pytest
 
-from openpilot.cereal import messaging
+from openpilot.cereal import log, messaging
 from openpilot.tools.turbo.webrtc_controls import (
+  CONTROL_PACKET_MAGIC,
   CerealDataChannelReceiver,
   FeedbackPacketReassembler,
+  LEGACY_FEEDBACK_PACKET_MAGIC,
   create_feedback_data_channel,
   encode_feedback_packets,
   expand_feedback_services,
   model_v2_ui_projection,
+  packed_cereal_message_payload,
   parse_control_services,
   split_control_services,
   udp_control_message_payload,
@@ -97,12 +100,14 @@ def test_udp_g29_projection_removes_reliable_button_edges():
       msg.l3 = True
       return msg
 
-  payload = json.loads(udp_control_message_payload("g29", FakeSubMaster()))
+  payload = udp_control_message_payload("g29", FakeSubMaster())
+  assert payload.startswith(CONTROL_PACKET_MAGIC)
+  msg = log.Event.from_bytes_packed(payload[len(CONTROL_PACKET_MAGIC):])
 
-  assert payload["data"]["steering"] == pytest.approx(0.25)
-  assert payload["data"]["accelerator"] == pytest.approx(0.5)
-  assert not payload["data"]["dpadUp"]
-  assert not payload["data"]["l3"]
+  assert msg.g29.steering == pytest.approx(0.25)
+  assert msg.g29.accelerator == pytest.approx(0.5)
+  assert not msg.g29.dpadUp
+  assert not msg.g29.l3
 
 
 def test_expand_feedback_services_accepts_explicit_services():
@@ -206,19 +211,63 @@ def test_cereal_data_channel_receiver_publishes_allowlisted_car_state():
 def test_cereal_data_channel_receiver_reassembles_framed_feedback():
   pm = FakePubMaster()
   receiver = CerealDataChannelReceiver(["carState"], pm=pm)
-  payload = json.dumps({
-    "type": "carState",
-    "logMonoTime": 123,
-    "valid": True,
-    "data": {"vEgo": 4.25},
-  }).encode()
-  packets = encode_feedback_packets(payload, message_id=123)
+  msg = messaging.new_message("carState", valid=True, logMonoTime=123)
+  msg.carState.vEgo = 4.25
+  packets = encode_feedback_packets(msg.to_bytes_packed(), message_id=123)
 
   for packet in reversed(packets):
     assert receiver.receive(packet)
 
   assert len(pm.sent) == 1
   assert pm.sent[0][1].carState.vEgo == 4.25
+
+
+def test_cereal_data_channel_receiver_accepts_legacy_framed_json_feedback():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["carState"], pm=pm)
+  payload = json.dumps({
+    "type": "carState",
+    "logMonoTime": 123,
+    "valid": True,
+    "data": {"vEgo": 4.25},
+  }).encode()
+  packets = encode_feedback_packets(payload, message_id=123, magic=LEGACY_FEEDBACK_PACKET_MAGIC)
+
+  for packet in reversed(packets):
+    assert receiver.receive(packet)
+
+  assert len(pm.sent) == 1
+  assert pm.sent[0][1].carState.vEgo == 4.25
+
+
+def test_cereal_data_channel_receiver_accepts_packed_udp_control():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["turboSteerAssist"], pm=pm)
+  msg = messaging.new_message("turboSteerAssist", valid=True, logMonoTime=123)
+  msg.turboSteerAssist.active = True
+  msg.turboSteerAssist.requestedSteeringAngleDeg = 92.5
+
+  assert receiver.receive(CONTROL_PACKET_MAGIC + msg.to_bytes_packed())
+
+  assert len(pm.sent) == 1
+  assert pm.sent[0][1].turboSteerAssist.active
+  assert pm.sent[0][1].turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(92.5)
+
+
+def test_cereal_data_channel_receiver_rejects_out_of_order_packed_message():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["carState"], pm=pm)
+  newer = messaging.new_message("carState", valid=True, logMonoTime=124)
+  newer.carState.vEgo = 4.25
+  older = messaging.new_message("carState", valid=True, logMonoTime=123)
+  older.carState.vEgo = 1.0
+
+  assert receiver.receive(CONTROL_PACKET_MAGIC + newer.to_bytes_packed())
+  assert not receiver.receive(CONTROL_PACKET_MAGIC + older.to_bytes_packed())
+
+  assert len(pm.sent) == 1
+  assert pm.sent[0][1].carState.vEgo == pytest.approx(4.25)
+  assert receiver.out_of_order == 1
 
 
 def test_cereal_data_channel_receiver_publishes_turbo_steer_assist():
@@ -320,6 +369,29 @@ def test_model_v2_ui_projection_keeps_only_renderer_fields():
       },
     },
   }
+
+
+def test_packed_model_v2_payload_keeps_projection_and_metadata():
+  source = messaging.new_message("modelV2", valid=True, logMonoTime=123)
+  source.modelV2.position.x = [1.0]
+  source.modelV2.orientation.x = [2.0]
+  source.modelV2.rawPredictions = b"heavy"
+
+  class FakeSubMaster:
+    logMonoTime = {"modelV2": source.logMonoTime}
+    valid = {"modelV2": source.valid}
+
+    def __getitem__(self, service):
+      assert service == "modelV2"
+      return source.modelV2
+
+  msg = log.Event.from_bytes_packed(packed_cereal_message_payload("modelV2", FakeSubMaster()))
+
+  assert msg.valid
+  assert msg.logMonoTime == 123
+  assert list(msg.modelV2.position.x) == [1.0]
+  assert list(msg.modelV2.orientation.x) == []
+  assert msg.modelV2.rawPredictions == b""
 
 
 def test_cereal_data_channel_receiver_accepts_slim_model_v2():

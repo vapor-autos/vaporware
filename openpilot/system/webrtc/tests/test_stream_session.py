@@ -217,7 +217,8 @@ class TestStreamSession:
     for call in channel.send.call_args_list:
       assembled = reassembler.add(call.args[0]) or assembled
     assert assembled is not None
-    assert json.loads(assembled)["data"]["vEgo"] == 1.5
+    msg = log.Event.from_bytes_packed(assembled)
+    assert msg.carState.vEgo == 1.5
     assert proxy.sent_packets["carState"] == channel.send.call_count
 
   def test_outgoing_proxy_paces_framed_feedback_packets(self, mocker):
@@ -260,7 +261,7 @@ class TestStreamSession:
       proxy.sm.update_msgs(0, [car_state_msg, model_msg])
 
     def mocked_packets(payload, message_id):
-      service = json.loads(payload)["type"]
+      service = log.Event.from_bytes_packed(payload).which()
       return [f"{service}-{message_id}-{index}".encode() for index in range(4 if service == "modelV2" else 1)]
 
     mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)

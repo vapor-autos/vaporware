@@ -30,7 +30,12 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
-from openpilot.tools.turbo.webrtc_controls import FEEDBACK_DATA_CHANNEL_LABEL, encode_feedback_packets, project_feedback_message
+from openpilot.tools.turbo.webrtc_controls import (
+  FEEDBACK_DATA_CHANNEL_LABEL,
+  encode_feedback_packets,
+  packed_cereal_message_payload,
+  project_feedback_message,
+)
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -206,6 +211,9 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
     return json.dumps(outgoing_msg).encode()
 
+  def _encode_packed_message(self, service: str) -> bytes:
+    return packed_cereal_message_payload(service, self.sm)
+
   def _update_framed_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
     packets_sent = 0
     while packets_sent < FEEDBACK_MAX_PACKETS_PER_UPDATE:
@@ -227,7 +235,7 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         if service is None:
           break
         self.feedback_sequence = (self.feedback_sequence + 1) & 0xFFFFFFFF
-        self.packet_queue.extend(encode_feedback_packets(self._encode_message(service), self.feedback_sequence))
+        self.packet_queue.extend(encode_feedback_packets(self._encode_packed_message(service), self.feedback_sequence))
         self.packet_service = service
         self.pending_send[service] = False
 

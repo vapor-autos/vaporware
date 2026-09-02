@@ -9,11 +9,13 @@ import zlib
 
 import capnp
 
-from openpilot.cereal import messaging
+from openpilot.cereal import log, messaging
 
 
 FEEDBACK_DATA_CHANNEL_LABEL = "feedback"
-FEEDBACK_PACKET_MAGIC = b"TFB1"
+LEGACY_FEEDBACK_PACKET_MAGIC = b"TFB1"
+FEEDBACK_PACKET_MAGIC = b"TFB2"
+CONTROL_PACKET_MAGIC = b"TCB1"
 FEEDBACK_PACKET_PAYLOAD_SIZE = 1000
 FEEDBACK_REASSEMBLY_TIMEOUT_S = 2.0
 FEEDBACK_MAX_PENDING_MESSAGES = 64
@@ -33,14 +35,22 @@ def create_feedback_data_channel(peer_connection, message_handler):
   return channel
 
 
-def encode_feedback_packets(payload: bytes, message_id: int) -> list[bytes]:
-  compressed = zlib.compress(payload, level=1)
+def encode_feedback_packets(
+  payload: bytes,
+  message_id: int,
+  magic: bytes = FEEDBACK_PACKET_MAGIC,
+) -> list[bytes]:
+  if magic == LEGACY_FEEDBACK_PACKET_MAGIC:
+    payload = zlib.compress(payload, level=1)
+  elif magic != FEEDBACK_PACKET_MAGIC:
+    raise ValueError("unknown feedback packet format")
+
   chunks = [
-    compressed[offset:offset + FEEDBACK_PACKET_PAYLOAD_SIZE]
-    for offset in range(0, len(compressed), FEEDBACK_PACKET_PAYLOAD_SIZE)
+    payload[offset:offset + FEEDBACK_PACKET_PAYLOAD_SIZE]
+    for offset in range(0, len(payload), FEEDBACK_PACKET_PAYLOAD_SIZE)
   ] or [b""]
   return [
-    _FEEDBACK_PACKET_HEADER.pack(FEEDBACK_PACKET_MAGIC, message_id & 0xFFFFFFFF, index, len(chunks)) + chunk
+    _FEEDBACK_PACKET_HEADER.pack(magic, message_id & 0xFFFFFFFF, index, len(chunks)) + chunk
     for index, chunk in enumerate(chunks)
   ]
 
@@ -53,38 +63,39 @@ class FeedbackPacketReassembler:
   ):
     self.timeout_s = timeout_s
     self.max_pending_messages = max_pending_messages
-    self.pending: dict[int, tuple[float, int, dict[int, bytes]]] = {}
+    self.pending: dict[tuple[bytes, int], tuple[float, int, dict[int, bytes]]] = {}
 
   def add(self, packet: bytes, now: float | None = None) -> bytes | None:
     if len(packet) < _FEEDBACK_PACKET_HEADER.size:
       raise ValueError("feedback packet is shorter than its header")
 
     magic, message_id, index, count = _FEEDBACK_PACKET_HEADER.unpack_from(packet)
-    if magic != FEEDBACK_PACKET_MAGIC or count == 0 or index >= count:
+    if magic not in (FEEDBACK_PACKET_MAGIC, LEGACY_FEEDBACK_PACKET_MAGIC) or count == 0 or index >= count:
       raise ValueError("invalid feedback packet header")
 
     now = time.monotonic() if now is None else now
     self._expire(now)
-    pending = self.pending.get(message_id)
+    message_key = (magic, message_id)
+    pending = self.pending.get(message_key)
     if pending is None or pending[1] != count:
       if len(self.pending) >= self.max_pending_messages:
-        oldest_id = min(self.pending, key=lambda pending_id: self.pending[pending_id][0])
-        del self.pending[oldest_id]
+        oldest_key = min(self.pending, key=lambda pending_key: self.pending[pending_key][0])
+        del self.pending[oldest_key]
       pending = (now, count, {})
-      self.pending[message_id] = pending
+      self.pending[message_key] = pending
 
     pending[2][index] = packet[_FEEDBACK_PACKET_HEADER.size:]
     if len(pending[2]) != count:
       return None
 
-    compressed = b"".join(pending[2][chunk_index] for chunk_index in range(count))
-    del self.pending[message_id]
-    return zlib.decompress(compressed)
+    payload = b"".join(pending[2][chunk_index] for chunk_index in range(count))
+    del self.pending[message_key]
+    return zlib.decompress(payload) if magic == LEGACY_FEEDBACK_PACKET_MAGIC else payload
 
   def _expire(self, now: float) -> None:
-    expired = [message_id for message_id, pending in self.pending.items() if now - pending[0] > self.timeout_s]
-    for message_id in expired:
-      del self.pending[message_id]
+    expired = [message_key for message_key, pending in self.pending.items() if now - pending[0] > self.timeout_s]
+    for message_key in expired:
+      del self.pending[message_key]
 
 
 UI_SMOKE_FEEDBACK_SERVICES = [
@@ -175,7 +186,7 @@ def cereal_to_json(msg_content: Any) -> Any:
 
 def model_v2_ui_projection(model: dict[str, Any]) -> dict[str, Any]:
   # The GCS debug UI only needs renderer fields; omit large model/debug fields
-  # to keep the reliable ordered LTE data channel from backing up.
+  # to keep the LTE feedback transport small.
   def as_dict(data: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
@@ -220,17 +231,29 @@ def cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
   return json.dumps(msg).encode()
 
 
+def packed_cereal_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
+  msg_content = sm[service]
+  msg = log.Event.new_message(
+    valid=sm.valid[service],
+    logMonoTime=sm.logMonoTime[service],
+  )
+  if service == "modelV2":
+    msg.init(service).from_dict(project_feedback_message(service, msg_content))
+  else:
+    setattr(msg, service, msg_content)
+  return msg.to_bytes_packed()
+
+
 def udp_control_message_payload(service: str, sm: messaging.SubMaster) -> bytes:
-  msg_data = project_feedback_message(service, sm[service])
+  msg = log.Event.new_message(
+    valid=sm.valid[service],
+    logMonoTime=sm.logMonoTime[service],
+  )
+  setattr(msg, service, sm[service])
   if service == "g29":
-    msg_data = {**msg_data, **dict.fromkeys(G29_EDGE_FIELDS, False)}
-  msg = {
-    "type": service,
-    "logMonoTime": sm.logMonoTime[service],
-    "valid": sm.valid[service],
-    "data": msg_data,
-  }
-  return json.dumps(msg).encode()
+    for field in G29_EDGE_FIELDS:
+      setattr(msg.g29, field, False)
+  return CONTROL_PACKET_MAGIC + msg.to_bytes_packed()
 
 
 class CerealDataChannelReceiver:
@@ -245,7 +268,8 @@ class CerealDataChannelReceiver:
     self.reassembler = FeedbackPacketReassembler()
 
   def receive(self, message: bytes | str) -> bool:
-    if isinstance(message, bytes) and message.startswith(FEEDBACK_PACKET_MAGIC):
+    if isinstance(message, bytes) and message.startswith((FEEDBACK_PACKET_MAGIC, LEGACY_FEEDBACK_PACKET_MAGIC)):
+      packet_magic = message[:4]
       try:
         assembled = self.reassembler.add(message)
       except (ValueError, zlib.error):
@@ -253,7 +277,12 @@ class CerealDataChannelReceiver:
         return False
       if assembled is None:
         return True
+      if packet_magic == FEEDBACK_PACKET_MAGIC:
+        return self._receive_packed(assembled)
       message = assembled
+
+    if isinstance(message, bytes) and message.startswith(CONTROL_PACKET_MAGIC):
+      return self._receive_packed(message[len(CONTROL_PACKET_MAGIC):])
 
     payload = json.loads(message)
     if not isinstance(payload, dict):
@@ -284,6 +313,28 @@ class CerealDataChannelReceiver:
     )
     setattr(msg, service, msg_data)
     self.pm.send(service, msg)
+    self.last_log_mono_time[service] = log_mono_time
+    self.received[service] += 1
+    return True
+
+  def _receive_packed(self, payload: bytes) -> bool:
+    try:
+      msg = log.Event.from_bytes_packed(payload)
+      service = msg.which()
+      log_mono_time = msg.logMonoTime
+    except capnp.KjException:
+      self.ignored += 1
+      return False
+
+    if service not in self.service_set:
+      self.ignored += 1
+      return False
+    if log_mono_time <= self.last_log_mono_time[service]:
+      self.ignored += 1
+      self.out_of_order += 1
+      return False
+
+    self.pm.send(service, msg.as_builder())
     self.last_log_mono_time[service] = log_mono_time
     self.received[service] += 1
     return True
