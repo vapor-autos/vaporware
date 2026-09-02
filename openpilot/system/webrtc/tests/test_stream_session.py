@@ -11,7 +11,8 @@ from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
 from openpilot.cereal import messaging, log
 
-from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy
+from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, FEEDBACK_SERVICE_RATES_HZ, UdpFeedbackChannel
+from openpilot.tools.turbo.webrtc_controls import FeedbackPacketReassembler
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
 
@@ -22,6 +23,19 @@ class TestStreamSession:
   def teardown_method(self):
     self.loop.stop()
     self.loop.close()
+
+  def test_udp_feedback_channel_sends_connected_datagrams(self, mocker):
+    udp_socket = mocker.patch("openpilot.system.webrtc.webrtcd.socket.socket").return_value
+    channel = UdpFeedbackChannel(("100.99.187.99", 8444))
+
+    udp_socket.connect.assert_called_once_with(("100.99.187.99", 8444))
+    channel.send(b"feedback")
+    udp_socket.send.assert_called_once_with(b"feedback")
+    assert channel.label == "feedback"
+    assert channel.bufferedAmount == 0
+
+    channel.close()
+    udp_socket.close.assert_called_once()
 
   def test_outgoing_proxy(self, mocker):
     test_msg = log.Event.new_message()
@@ -76,6 +90,9 @@ class TestStreamSession:
     proxy = CerealOutgoingMessageProxy(["modelV2", "controlsState", "deviceState", "selfdriveState", "carOutput", "carState"])
 
     assert proxy.services == ["carState", "selfdriveState", "carOutput", "controlsState", "modelV2", "deviceState"]
+
+  def test_controls_state_feedback_rate(self):
+    assert FEEDBACK_SERVICE_RATES_HZ["controlsState"] == 20.0
 
   def test_outgoing_proxy_keeps_pending_message_until_rate_limit_opens(self, mocker):
     car_state_msg = messaging.new_message("carState")
@@ -153,6 +170,113 @@ class TestStreamSession:
     assert proxy.maybe_log_stats(now=106.0, last_log=100.0) == 106.0
     log_stats.assert_called_once()
 
+  def test_outgoing_proxy_exposes_feedback_metrics(self, mocker):
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.bufferedAmount = 123
+    proxy = CerealOutgoingMessageProxy(["carState"], max_buffered_amount=456)
+    proxy.add_channel(channel)
+    proxy.sent["carState"] = 7
+    proxy.sent_packets["carState"] = 9
+    proxy.skipped["carState"] = 2
+    proxy.sent_bytes["carState"] = 1024
+    proxy.pending_send["carState"] = True
+    proxy.max_observed_buffered_amount = 321
+
+    assert proxy.feedback_metrics() == {
+      "sent": {"carState": 7},
+      "sent_packets": {"carState": 9},
+      "skipped": {"carState": 2},
+      "sent_bytes": {"carState": 1024},
+      "pending": {"carState": True},
+      "buffered_amount": 123,
+      "buffered_limit": 456,
+      "max_observed_buffered_amount": 321,
+      "channels": 1,
+    }
+
+  def test_outgoing_proxy_frames_feedback_channel_messages(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg])
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    proxy.add_channel(channel)
+    proxy.update()
+
+    reassembler = FeedbackPacketReassembler()
+    assembled = None
+    for call in channel.send.call_args_list:
+      assembled = reassembler.add(call.args[0]) or assembled
+    assert assembled is not None
+    msg = log.Event.from_bytes_packed(assembled)
+    assert msg.carState.vEgo == 1.5
+    assert proxy.sent_packets["carState"] == channel.send.call_count
+
+  def test_outgoing_proxy_paces_framed_feedback_packets(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    car_state_msg.logMonoTime = 123
+    car_state_msg.valid = True
+    car_state_msg.carState.vEgo = 1.5
+
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg])
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.encode_feedback_packets", return_value=[b"one", b"two", b"three"])
+    proxy.add_channel(channel)
+
+    proxy.update()
+    assert channel.send.call_count == 2
+    assert proxy.sent["carState"] == 0
+    assert proxy.sent_packets["carState"] == 2
+
+    proxy.update()
+    assert channel.send.call_count == 3
+    assert proxy.sent["carState"] == 1
+    assert proxy.sent_packets["carState"] == 3
+
+  def test_outgoing_proxy_finishes_model_message_when_critical_feedback_arrives(self, mocker):
+    car_state_msg = messaging.new_message("carState")
+    model_msg = messaging.new_message("modelV2")
+    channel = mocker.Mock(spec=RTCDataChannel)
+    channel.label = "feedback"
+    channel.bufferedAmount = 0
+    proxy = CerealOutgoingMessageProxy(["modelV2", "carState"])
+
+    def mocked_update(t):
+      proxy.sm.update_msgs(0, [car_state_msg, model_msg])
+
+    def mocked_packets(payload, message_id):
+      service = log.Event.from_bytes_packed(payload).which()
+      return [f"{service}-{message_id}-{index}".encode() for index in range(4 if service == "modelV2" else 1)]
+
+    mocker.patch.object(messaging.SubMaster, "update", side_effect=mocked_update)
+    mocker.patch("openpilot.system.webrtc.webrtcd.encode_feedback_packets", side_effect=mocked_packets)
+    proxy.add_channel(channel)
+
+    proxy.update()
+    proxy.update()
+    proxy.update()
+
+    sent_packets = [call.args[0].decode() for call in channel.send.call_args_list]
+    assert sent_packets == ["carState-1-0", "modelV2-2-0", "modelV2-2-1", "modelV2-2-2", "modelV2-2-3"]
+    assert proxy.sent["modelV2"] == 1
+    assert proxy.pending_send["carState"]
+
   def test_incoming_proxy(self, mocker):
     tested_msgs = [
       {"type": "customReservedRawData0", "data": "test"}, # primitive
@@ -174,6 +298,28 @@ class TestStreamSession:
       assert hasattr(md, msg["type"])
 
       mocked_pubmaster.reset_mock()
+
+  def test_incoming_proxy_preserves_message_metadata(self, mocker):
+    mocked_pubmaster = mocker.MagicMock(spec=messaging.PubMaster)
+    proxy = CerealIncomingMessageProxy(mocked_pubmaster)
+    msg = {
+      "type": "turboSteerAssist",
+      "logMonoTime": 123,
+      "valid": True,
+      "data": {
+        "active": True,
+        "requestedSteeringAngleDeg": 12.5,
+      },
+    }
+
+    proxy.send(json.dumps(msg).encode())
+
+    service, forwarded = mocked_pubmaster.send.call_args.args
+    assert service == "turboSteerAssist"
+    assert forwarded.valid
+    assert forwarded.logMonoTime == 123
+    assert forwarded.turboSteerAssist.active
+    assert forwarded.turboSteerAssist.requestedSteeringAngleDeg == 12.5
 
   def test_livestream_track(self, mocker):
     fake_msg = messaging.new_message("livestreamDriverEncodeData")

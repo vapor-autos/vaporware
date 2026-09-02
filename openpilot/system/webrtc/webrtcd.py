@@ -7,6 +7,7 @@ import time
 import argparse
 import asyncio
 import contextlib
+from collections import deque
 import json
 import uuid
 import logging
@@ -29,7 +30,12 @@ from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.schema import generate_field
 from openpilot.tools.turbo.modem_stats import read_modem_stats
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, write_metrics_payload
-from openpilot.tools.turbo.webrtc_controls import project_feedback_message
+from openpilot.tools.turbo.webrtc_controls import (
+  FEEDBACK_DATA_CHANNEL_LABEL,
+  encode_feedback_packets,
+  packed_cereal_message_payload,
+  project_feedback_message,
+)
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
 
@@ -95,8 +101,10 @@ FEEDBACK_SERVICE_RATES_HZ = {
   "onroadEvents": 5.0,
 }
 FEEDBACK_DEFAULT_RATE_HZ = 10.0
-FEEDBACK_MAX_BUFFERED_AMOUNT = 16 * 1024
+FEEDBACK_MAX_BUFFERED_AMOUNT = 1024
+FEEDBACK_MAX_PACKETS_PER_UPDATE = 2
 FEEDBACK_LOG_INTERVAL = 5.0
+FEEDBACK_CHANNEL_WAIT_TIMEOUT = 2.0
 FEEDBACK_SERVICE_PRIORITIES = {
   "carState": 0,
   "selfdriveState": 1,
@@ -104,6 +112,22 @@ FEEDBACK_SERVICE_PRIORITIES = {
   "controlsState": 3,
   "onroadEvents": 4,
 }
+
+
+class UdpFeedbackChannel:
+  label = FEEDBACK_DATA_CHANNEL_LABEL
+  bufferedAmount = 0
+
+  def __init__(self, endpoint: tuple[str, int]):
+    self.endpoint = endpoint
+    self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.socket.connect(endpoint)
+
+  def send(self, packet: bytes) -> None:
+    self.socket.send(packet)
+
+  def close(self) -> None:
+    self.socket.close()
 
 
 class CerealOutgoingMessageProxy(AsyncTaskRunner):
@@ -135,9 +159,13 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     self.last_send_time: dict[str, float] = dict.fromkeys(self.services, 0.0)
     self.pending_send: dict[str, bool] = dict.fromkeys(self.services, False)
     self.sent: dict[str, int] = dict.fromkeys(self.services, 0)
+    self.sent_packets: dict[str, int] = dict.fromkeys(self.services, 0)
     self.skipped: dict[str, int] = dict.fromkeys(self.services, 0)
     self.sent_bytes: dict[str, int] = dict.fromkeys(self.services, 0)
     self.max_observed_buffered_amount = 0
+    self.feedback_sequence = 0
+    self.packet_queue: deque[bytes] = deque()
+    self.packet_service: str | None = None
 
   def add_channel(self, channel: 'RTCDataChannel'):
     self.channels.append(channel)
@@ -164,6 +192,86 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
         buffered_amounts.append(0)
     return max(buffered_amounts)
 
+  def feedback_metrics(self) -> dict[str, Any]:
+    return {
+      "sent": dict(self.sent),
+      "sent_packets": dict(self.sent_packets),
+      "skipped": dict(self.skipped),
+      "sent_bytes": dict(self.sent_bytes),
+      "pending": dict(self.pending_send),
+      "buffered_amount": self.buffered_amount(),
+      "buffered_limit": self.max_buffered_amount,
+      "max_observed_buffered_amount": self.max_observed_buffered_amount,
+      "channels": len(self.channels),
+    }
+
+  def _encode_message(self, service: str) -> bytes:
+    msg_dict = project_feedback_message(service, self.sm[service])
+    mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
+    outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
+    return json.dumps(outgoing_msg).encode()
+
+  def _encode_packed_message(self, service: str) -> bytes:
+    return packed_cereal_message_payload(service, self.sm)
+
+  def _update_framed_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
+    packets_sent = 0
+    while packets_sent < FEEDBACK_MAX_PACKETS_PER_UPDATE:
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        if self.packet_service is not None:
+          self.skipped[self.packet_service] += 1
+        break
+
+      if not self.packet_queue:
+        service = next(
+          (
+            candidate for candidate in self.services
+            if self.pending_send[candidate] and self.should_send(candidate, now)
+          ),
+          None,
+        )
+        if service is None:
+          break
+        self.feedback_sequence = (self.feedback_sequence + 1) & 0xFFFFFFFF
+        self.packet_queue.extend(encode_feedback_packets(self._encode_packed_message(service), self.feedback_sequence))
+        self.packet_service = service
+        self.pending_send[service] = False
+
+      assert self.packet_service is not None
+      packet = self.packet_queue.popleft()
+      for channel in channels:
+        channel.send(packet)
+      self.sent_packets[self.packet_service] += 1
+      self.sent_bytes[self.packet_service] += len(packet)
+      packets_sent += 1
+
+      if not self.packet_queue:
+        self.last_send_time[self.packet_service] = now
+        self.sent[self.packet_service] += 1
+        self.packet_service = None
+
+  def _update_legacy_feedback(self, channels: list['RTCDataChannel'], now: float) -> None:
+    for service in self.services:
+      if not self.pending_send[service] or not self.should_send(service, now):
+        continue
+
+      encoded_msg = self._encode_message(service)
+      buffered_amount = self.buffered_amount()
+      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
+      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
+        self.skipped[service] += 1
+        continue
+
+      for channel in channels:
+        channel.send(encoded_msg)
+      self.last_send_time[service] = now
+      self.pending_send[service] = False
+      self.sent[service] += 1
+      self.sent_packets[service] += 1
+      self.sent_bytes[service] += len(encoded_msg)
+
   def update(self):
     # this is blocking in async context...
     self.sm.update(0)
@@ -171,27 +279,13 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
     for service in self.services:
       if self.sm.updated[service]:
         self.pending_send[service] = True
-      if not self.pending_send[service]:
-        continue
-      if not self.should_send(service, now):
-        continue
-      msg_dict = project_feedback_message(service, self.sm[service])
-      mono_time, valid = self.sm.logMonoTime[service], self.sm.valid[service]
-      outgoing_msg = {"type": service, "logMonoTime": mono_time, "valid": valid, "data": msg_dict}
-      encoded_msg = json.dumps(outgoing_msg).encode()
 
-      buffered_amount = self.buffered_amount()
-      self.max_observed_buffered_amount = max(self.max_observed_buffered_amount, buffered_amount)
-      if self.max_buffered_amount > 0 and buffered_amount > self.max_buffered_amount:
-        self.skipped[service] += 1
-        continue
-
-      for channel in self.channels:
-        channel.send(encoded_msg)
-      self.last_send_time[service] = now
-      self.pending_send[service] = False
-      self.sent[service] += 1
-      self.sent_bytes[service] += len(encoded_msg)
+    feedback_channels = [channel for channel in self.channels if channel.label == FEEDBACK_DATA_CHANNEL_LABEL]
+    legacy_channels = [channel for channel in self.channels if channel.label != FEEDBACK_DATA_CHANNEL_LABEL]
+    if feedback_channels:
+      self._update_framed_feedback(feedback_channels, now)
+    if legacy_channels:
+      self._update_legacy_feedback(legacy_channels, now)
 
   def log_stats(self):
     sent_counts = " ".join(f"{service}={count}" for service, count in self.sent.items())
@@ -243,7 +337,12 @@ class CerealIncomingMessageProxy:
     if not isinstance(msg_data, dict):
       size = len(msg_data)
 
-    msg = messaging.new_message(msg_type, size=size)
+    msg = messaging.new_message(
+      msg_type,
+      size=size,
+      valid=bool(msg_json.get("valid", False)),
+      logMonoTime=int(msg_json.get("logMonoTime", time.monotonic() * 1e9)),
+    )
     setattr(msg, msg_type, msg_data)
     self.pm.send(msg_type, msg)
 
@@ -340,11 +439,18 @@ class LivestreamBitrateController(AsyncTaskRunner):
 
 
 class WebRTCStatsLogger(AsyncTaskRunner):
-  def __init__(self, peer_connection: Any, interval: float, enabled: bool = True):
+  def __init__(
+    self,
+    peer_connection: Any,
+    interval: float,
+    enabled: bool = True,
+    feedback_bridge: CerealOutgoingMessageProxy | None = None,
+  ):
     super().__init__()
     self.pc = peer_connection
     self.interval = interval
     self._enabled = enabled
+    self.feedback_bridge = feedback_bridge
     self.last_outbound: dict[str, dict[str, int]] = {}
     self.stats_file = os.getenv("WEBRTCD_STATS_FILE") or default_metrics_jsonl_path("ugv_webrtcd")
     self.latest_file = os.getenv("WEBRTCD_STATS_LATEST_FILE") or default_latest_json_path("ugv_webrtcd")
@@ -405,6 +511,8 @@ class WebRTCStatsLogger(AsyncTaskRunner):
 
       if any(summary.values()):
         payload: dict[str, Any] = {"webrtcd_stats": summary}
+        if self.feedback_bridge is not None:
+          payload["feedback_stats"] = self.feedback_bridge.feedback_metrics()
         modem_stats = read_modem_stats(self.modem_file)
         if modem_stats is not None:
           payload["modem_stats"] = modem_stats
@@ -414,7 +522,12 @@ class WebRTCStatsLogger(AsyncTaskRunner):
 class StreamSession:
   shared_pub_master = DynamicPubMaster([])
 
-  def __init__(self, body: StreamRequestBody, debug_mode: bool = False):
+  def __init__(
+    self,
+    body: StreamRequestBody,
+    debug_mode: bool = False,
+    feedback_udp_endpoint: tuple[str, int] | None = None,
+  ):
     if debug_mode:
       from aiortc.mediastreams import VideoStreamTrack
     from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
@@ -442,6 +555,10 @@ class StreamSession:
     self.incoming_bridge: CerealIncomingMessageProxy | None = None
     self.incoming_bridge_services = body.bridge_services_in
     self.outgoing_bridge: CerealOutgoingMessageProxy | None = None
+    self.feedback_channel = None
+    self.feedback_channel_ready = asyncio.Event()
+    self.feedback_udp_endpoint = feedback_udp_endpoint
+    self.feedback_udp_channel: UdpFeedbackChannel | None = None
     self.bitrate_controller: LivestreamBitrateController | None = None
     self.stats_logger: WebRTCStatsLogger | None = None
     if len(body.bridge_services_in) > 0:
@@ -454,12 +571,23 @@ class StreamSession:
         max_buffered_amount=int(os.getenv("TURBO_WEBRTCD_FEEDBACK_MAX_BUFFERED_AMOUNT", str(FEEDBACK_MAX_BUFFERED_AMOUNT))),
         log_stats=webrtc_stats_enabled,
       )
+
+      @self.stream.peer_connection.on("datachannel")
+      def on_datachannel(channel):
+        if channel.label != FEEDBACK_DATA_CHANNEL_LABEL:
+          return
+        self.feedback_channel = channel
+        if channel.readyState == "open":
+          self.feedback_channel_ready.set()
+        else:
+          channel.on("open", self.feedback_channel_ready.set)
     self.bitrate_controller = LivestreamBitrateController(self.stream.peer_connection, self.params, self.enabled)
     if os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on"):
       self.stats_logger = WebRTCStatsLogger(
         self.stream.peer_connection,
         float(os.getenv("WEBRTCD_STATS_INTERVAL", "2.0")),
         self.enabled,
+        self.outgoing_bridge,
       )
 
     self.run_task: asyncio.Task | None = None
@@ -533,7 +661,19 @@ class StreamSession:
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
         if self.outgoing_bridge is not None:
-          channel = self.stream.get_messaging_channel()
+          if self.feedback_udp_endpoint is not None:
+            self.feedback_udp_channel = UdpFeedbackChannel(self.feedback_udp_endpoint)
+            channel = self.feedback_udp_channel
+            self.logger.info("Using UDP feedback endpoint %s:%s", *self.feedback_udp_endpoint)
+          else:
+            try:
+              await asyncio.wait_for(self.feedback_channel_ready.wait(), timeout=FEEDBACK_CHANNEL_WAIT_TIMEOUT)
+            except TimeoutError:
+              channel = self.stream.get_messaging_channel()
+              self.logger.warning("Feedback channel unavailable; using default reliable data channel")
+            else:
+              channel = self.feedback_channel
+              self.logger.info("Using unordered no-retransmit feedback data channel")
           self.outgoing_bridge.add_channel(channel)
           self.outgoing_bridge.start()
       self.bitrate_controller.start()
@@ -559,6 +699,9 @@ class StreamSession:
       await self.bitrate_controller.stop()
       if self.outgoing_bridge is not None:
         await self.outgoing_bridge.stop()
+      if self.feedback_udp_channel is not None:
+        self.feedback_udp_channel.close()
+        self.feedback_udp_channel = None
       for track in self.video_tracks.values():
         track.stop()
       self.video_tracks = {}

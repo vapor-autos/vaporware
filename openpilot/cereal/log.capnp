@@ -2607,8 +2607,8 @@ struct Event {
     g29 @107 :G29;
     teleopSendCan @108 :List(CanData);
     teleopCarControl @109 :Car.CarControl;
-    customReserved3 @110 :Custom.CustomReserved3;
-    customReserved4 @111 :Custom.CustomReserved4;
+    turboSteerAssist @110 :Custom.TurboSteerAssist;
+    turboTeleopCommand @111 :Custom.TurboTeleopCommand;
     customReserved5 @112 :Custom.CustomReserved5;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;

@@ -32,7 +32,7 @@ def steer_cmd(steering: float) -> int:
 
 
 def button_event_can_msgs(packer: CANPacker, g29) -> list[tuple[int, bytes, int]]:
-  # These button fields are edge pulses generated from g29py.get_events(), not held button state.
+  # Legacy SCTP fallback carries these edge pulses in g29. The UDP projection clears them.
   if g29.dpadUp:
     return [packer.make_can_msg("TOGGLE_HEADLIGHTS", MAIN_BUS, {"HEADLIGHTS_TOGGLE": 1})]
   if g29.dpadDown:
@@ -44,8 +44,21 @@ def button_event_can_msgs(packer: CANPacker, g29) -> list[tuple[int, bytes, int]
   return []
 
 
+def teleop_command_can_msg(packer: CANPacker, command: str) -> tuple[int, bytes, int]:
+  if command == "headlightsOn":
+    return packer.make_can_msg("TOGGLE_HEADLIGHTS", MAIN_BUS, {"HEADLIGHTS_TOGGLE": 1})
+  if command == "headlightsOff":
+    return packer.make_can_msg("TOGGLE_HEADLIGHTS", MAIN_BUS, {"HEADLIGHTS_TOGGLE": 0})
+  if command == "cruiseEnable":
+    return packer.make_can_msg("CRUISE_ENABLE", MAIN_BUS, {"ENABLE": 1})
+  if command == "cruiseCancel":
+    return packer.make_can_msg("CRUISE_ENABLE", MAIN_BUS, {"ENABLE": 0})
+  raise ValueError(f"unsupported Turbo teleop command: {command}")
+
+
 def main() -> None:
   g29_sock = messaging.sub_sock("g29")
+  teleop_command_sock = messaging.sub_sock("turboTeleopCommand")
   sm = messaging.SubMaster(["carControl"])
   pm = messaging.PubMaster(["teleopSendCan"])
   packer = CANPacker(DBC_NAME)
@@ -70,7 +83,6 @@ def main() -> None:
         can_msgs.insert(0, packer.make_can_msg("STEER_CMD", MAIN_BUS, {"STEER_ANGLE": steer_cmd(g29.steering)}))
 
       can_msgs.extend(button_event_can_msgs(packer, g29))
-
       pm.send("teleopSendCan", can_list_to_can_capnp(can_msgs, msgtype="sendcan"))
 
       if rk.frame % LOG_INTERVAL_FRAMES == 0:
@@ -81,6 +93,12 @@ def main() -> None:
           log,
           flush=True,
         )
+
+    for msg in messaging.drain_sock(teleop_command_sock):
+      if msg.which() != "turboTeleopCommand":
+        continue
+      can_msg = teleop_command_can_msg(packer, str(msg.turboTeleopCommand.command))
+      pm.send("teleopSendCan", can_list_to_can_capnp([can_msg], msgtype="sendcan"))
 
     rk.keep_time()
 

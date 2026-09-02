@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 from numbers import Number
+import os
+import time
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
@@ -19,6 +21,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import DEFAULT_STALE_TIMEOUT_S, TurboSteerAssistDecision, TurboSteerAssistSource
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -28,6 +31,14 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 TURBO_MAX_CURVATURE = 0.45
+TURBO_STEER_ASSIST_LOG_INTERVAL_S = 1.0
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 class Controls:
@@ -39,15 +50,28 @@ class Controls:
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP)
 
-    self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
-                                   'liveCalibration', 'livePose', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+    services = ['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
+                'liveCalibration', 'livePose', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
+                'driverMonitoringState', 'onroadEvents', 'driverAssistance']
+    turbo_steer_assist_supported = self.CP.brand == "turbo" and self.CP.steerControlType == car.CarParams.SteerControlType.angle
+    if turbo_steer_assist_supported:
+      services.append('turboSteerAssist')
+    self.sm = messaging.SubMaster(services, poll='selfdriveState')
     self.pm = messaging.PubMaster(['carControl', 'controlsState'])
 
     self.steer_limited_by_safety = False
     self.curvature = 0.0
     self.desired_curvature = 0.0
     self.max_curvature = TURBO_MAX_CURVATURE if self.CP.brand == "turbo" else MAX_CURVATURE
+    self.turbo_steer_assist_apply = turbo_steer_assist_supported and env_bool("TURBO_STEER_ASSIST_APPLY")
+    self.turbo_steer_assist_source = (
+      TurboSteerAssistSource(
+        self.sm,
+        stale_timeout_s=float(os.getenv("TURBO_STEER_ASSIST_STALE_TIMEOUT_S", str(DEFAULT_STALE_TIMEOUT_S))),
+      )
+      if turbo_steer_assist_supported else None
+    )
+    self.turbo_steer_assist_last_log = 0.0
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -138,7 +162,20 @@ class Controls:
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:
-      actuators.steeringAngleDeg = float(lateral_output)
+      model_angle_deg = float(lateral_output)
+      assist_decision = (
+        self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
+        if self.turbo_steer_assist_source is not None else None
+      )
+      final_angle_deg = (
+        assist_decision.target_angle_deg
+        if self.turbo_steer_assist_apply and assist_decision is not None and assist_decision.target_angle_deg is not None
+        else model_angle_deg
+      )
+      actuators.steeringAngleDeg = final_angle_deg
+      if assist_decision is not None:
+        self.log_turbo_steer_assist(model_angle_deg, final_angle_deg, assist_decision)
+
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
       attr = getattr(actuators, p)
@@ -150,6 +187,36 @@ class Controls:
         setattr(actuators, p, 0.0)
 
     return CC, lac_log
+
+  def log_turbo_steer_assist(
+    self,
+    model_angle_deg: float,
+    final_angle_deg: float,
+    decision: TurboSteerAssistDecision,
+  ) -> None:
+    now = time.monotonic()
+    if now - self.turbo_steer_assist_last_log < TURBO_STEER_ASSIST_LOG_INTERVAL_S:
+      return
+    age = decision.receive_age_s
+    age_text = "none" if age is None else f"{age:.3f}s"
+    context_age = decision.context_age_s
+    context_age_text = "none" if context_age is None else f"{context_age:.3f}s"
+    base_model_delta = decision.base_model_delta_deg
+    base_model_delta_text = "none" if base_model_delta is None else f"{base_model_delta:.2f}deg"
+    assist_target_text = "none" if decision.target_angle_deg is None else f"{decision.target_angle_deg:.2f}deg"
+    cloudlog.info(
+      "turbo steer assist apply=%s status=%s age=%s context_age=%s base_model_delta=%s sequence=%d model_angle=%.2fdeg assist_target=%s final_angle=%.2fdeg",
+      self.turbo_steer_assist_apply,
+      decision.status,
+      age_text,
+      context_age_text,
+      base_model_delta_text,
+      decision.sequence,
+      model_angle_deg,
+      assist_target_text,
+      final_angle_deg,
+    )
+    self.turbo_steer_assist_last_log = now
 
   def publish(self, CC, lac_log):
     CS = self.sm['carState']
