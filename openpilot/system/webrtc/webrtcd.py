@@ -88,7 +88,7 @@ FEEDBACK_SERVICE_RATES_HZ = {
   "carState": 20.0,
   "selfdriveState": 20.0,
   "carOutput": 20.0,
-  "controlsState": 50.0,
+  "controlsState": 20.0,
   "modelV2": 2.0,
   "deviceState": 2.0,
   "liveCalibration": 4.0,

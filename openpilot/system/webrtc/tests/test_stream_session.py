@@ -11,7 +11,7 @@ from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
 from openpilot.cereal import messaging, log
 
-from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, UdpFeedbackChannel
+from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, FEEDBACK_SERVICE_RATES_HZ, UdpFeedbackChannel
 from openpilot.tools.turbo.webrtc_controls import FeedbackPacketReassembler
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
@@ -90,6 +90,9 @@ class TestStreamSession:
     proxy = CerealOutgoingMessageProxy(["modelV2", "controlsState", "deviceState", "selfdriveState", "carOutput", "carState"])
 
     assert proxy.services == ["carState", "selfdriveState", "carOutput", "controlsState", "modelV2", "deviceState"]
+
+  def test_controls_state_feedback_rate(self):
+    assert FEEDBACK_SERVICE_RATES_HZ["controlsState"] == 20.0
 
   def test_outgoing_proxy_keeps_pending_message_until_rate_limit_opens(self, mocker):
     car_state_msg = messaging.new_message("carState")
