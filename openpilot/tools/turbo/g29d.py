@@ -272,7 +272,7 @@ def _publish_state(sock, state: dict, events: list[dict]) -> None:
   sock.send(msg.to_bytes())
 
 
-class SteerAssistNudgePublisher:
+class SteerAssistPublisher:
   def __init__(self, sock, config: SteerAssistConfig = STEER_ASSIST_CONFIG):
     self.sock = sock
     self.controller = SteerAssistController(config)
@@ -353,7 +353,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
     speed_source = SpeedSource()
     assist_target_source = AssistTargetSource()
     haptic_target_limiter = HapticTargetLimiter()
-    steer_assist_publisher = SteerAssistNudgePublisher(steer_assist_sock)
+    steer_assist_publisher = SteerAssistPublisher(steer_assist_sock)
     steer_assist_metrics_file = default_latest_json_path(STEER_ASSIST_METRICS_NAME)
     g29.listen()
 
@@ -369,9 +369,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
           f"carstate_stale={TORQUE_SIM_CARSTATE_STALE_S:.2f}s",
           f"assist_stale={TORQUE_SIM_ASSIST_STALE_S:.2f}s",
           f"assist_stale_grace={TORQUE_SIM_ASSIST_STALE_GRACE_S:.2f}s",
-          f"steer_assist_inner_deadband={STEER_ASSIST_CONFIG.inner_deadband_deg:.1f}deg",
-          f"steer_assist_full_error={STEER_ASSIST_CONFIG.full_assist_error_deg:.1f}deg",
-          f"steer_assist_tracking_error={STEER_ASSIST_CONFIG.tracking_error_deg:.1f}deg",
+          f"steer_assist_position_tolerance={STEER_ASSIST_CONFIG.position_tolerance_deg:.1f}deg",
           f"steer_assist_tracking_duration={STEER_ASSIST_CONFIG.tracking_duration_s:.2f}s",
           f"steer_assist_candidate_duration={STEER_ASSIST_CONFIG.candidate_duration_s:.2f}s",
           f"steer_assist_min_outward_velocity={STEER_ASSIST_CONFIG.min_outward_velocity_deg_s:.0f}deg/s",
@@ -440,7 +438,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
               "stale_grace_s": TORQUE_SIM_ASSIST_STALE_GRACE_S,
               "active": assist_decision.active,
               "tracking_status": assist_decision.tracking_status,
-              "tracking_error_deg": STEER_ASSIST_CONFIG.tracking_error_deg,
+              "position_tolerance_deg": STEER_ASSIST_CONFIG.position_tolerance_deg,
               "tracking_duration_s": STEER_ASSIST_CONFIG.tracking_duration_s,
               "min_outward_velocity_deg_s": STEER_ASSIST_CONFIG.min_outward_velocity_deg_s,
               "candidate_duration_s": STEER_ASSIST_CONFIG.candidate_duration_s,
@@ -472,11 +470,9 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
               "model_error_deg": assist_decision.model_error_deg,
               "residual_deg": assist_decision.residual_angle_deg,
               "model_haptic_delta_deg": assist_decision.model_haptic_delta_deg,
-              "haptic_nudge_deg": assist_decision.haptic_nudge_angle_deg,
-              "desired_blended_target_angle_deg": assist_decision.desired_blended_target_angle_deg,
-              "blended_target_angle_deg": assist_decision.blended_target_angle_deg,
-              "raw_nudge_deg": assist_decision.raw_nudge_angle_deg,
-              "nudge_deg": assist_decision.nudge_angle_deg,
+              "target_spread_deg": assist_decision.target_spread_deg,
+              "requested_target_angle_deg": assist_decision.requested_steering_angle_deg,
+              "requested_correction_angle_deg": assist_decision.requested_correction_angle_deg,
               "force": command.force,
               "friction": command.friction,
             },
@@ -515,13 +511,12 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
               f"model_haptic_delta={assist_decision.model_haptic_delta_deg:.2f}deg",
               f"wheel_velocity={assist_decision.wheel_velocity_deg_s:.2f}deg/s",
               f"relative_velocity={assist_decision.relative_velocity_deg_s:.2f}deg/s",
-              f"haptic_nudge={assist_decision.haptic_nudge_angle_deg:.2f}deg",
-              f"desired_blended_target={assist_decision.desired_blended_target_angle_deg:.2f}deg",
-              f"blended_target={assist_decision.blended_target_angle_deg:.2f}deg",
+              f"target_spread={assist_decision.target_spread_deg:.2f}deg",
+              f"requested_target={assist_decision.requested_steering_angle_deg:.2f}deg",
+              f"requested_correction={assist_decision.requested_correction_angle_deg:.2f}deg",
               f"override_slewing={assist_decision.override_slewing}",
               f"release_pending={assist_decision.release_since is not None}",
               f"release_evidence={assist_decision.release_evidence_s:.2f}s",
-              f"nudge={assist_decision.nudge_angle_deg:.2f}deg",
               f"factor={command.speed_factor:.2f}",
               f"force_factor={command.force_factor:.2f}",
               f"target={command.target_position:.3f}",

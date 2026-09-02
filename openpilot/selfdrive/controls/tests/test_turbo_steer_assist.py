@@ -4,7 +4,6 @@ import pytest
 
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
   TurboSteerAssistSource,
-  compute_nudge_angle_deg,
   g29_steering_to_angle_deg,
   steering_angle_to_g29_target,
 )
@@ -65,15 +64,6 @@ def test_g29_steering_to_angle_deg_uses_teleop_sign():
   assert g29_steering_to_angle_deg(0.5) == pytest.approx(-90.0)
 
 
-def test_compute_nudge_angle_deg_uses_soft_deadband():
-  assert compute_nudge_angle_deg(wheel_steering=-94.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.0)
-  assert compute_nudge_angle_deg(wheel_steering=-95.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.0)
-  assert compute_nudge_angle_deg(wheel_steering=-96.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(0.624)
-  assert compute_nudge_angle_deg(wheel_steering=-97.5 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(3.75)
-  assert compute_nudge_angle_deg(wheel_steering=-100.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(10.0)
-  assert compute_nudge_angle_deg(wheel_steering=-80.0 / 180.0, target_steering_angle_deg=90.0) == pytest.approx(-10.0)
-
-
 def test_turbo_steer_assist_source_uses_fresh_active_target():
   sm = FakeSubMaster(recv_time=10.0, requested_angle_deg=7.0)
   source = TurboSteerAssistSource(sm, stale_timeout_s=0.25)
@@ -113,7 +103,7 @@ def test_turbo_steer_assist_source_clips_target_to_steering_range():
   assert decision.status == "active"
 
 
-def test_turbo_steer_assist_source_returns_absolute_blended_target():
+def test_turbo_steer_assist_source_returns_absolute_target():
   sm = FakeSubMaster(recv_time=10.0, requested_angle_deg=5.0, base_model_angle_deg=17.0)
   source = TurboSteerAssistSource(sm, stale_timeout_s=0.25)
 

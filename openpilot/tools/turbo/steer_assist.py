@@ -3,20 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
-  DEFAULT_FULL_ASSIST_ERROR_DEG,
-  DEFAULT_INNER_DEADBAND_DEG,
-  clip,
-  compute_nudge_angle_deg,
-  steering_angle_to_g29_target,
-)
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import clip
 
 
 @dataclass(frozen=True)
 class SteerAssistConfig:
-  inner_deadband_deg: float = DEFAULT_INNER_DEADBAND_DEG
-  full_assist_error_deg: float = DEFAULT_FULL_ASSIST_ERROR_DEG
-  tracking_error_deg: float = 5.0
+  position_tolerance_deg: float = 5.0
   tracking_duration_s: float = 0.3
   min_outward_velocity_deg_s: float = 10.0
   candidate_duration_s: float = 0.08
@@ -27,7 +19,7 @@ class SteerAssistConfig:
 
   def __post_init__(self) -> None:
     nonnegative_fields = (
-      "tracking_error_deg",
+      "position_tolerance_deg",
       "tracking_duration_s",
       "min_outward_velocity_deg_s",
       "candidate_duration_s",
@@ -64,12 +56,9 @@ class SteerAssistDecision:
   model_error_deg: float
   residual_angle_deg: float
   model_haptic_delta_deg: float
-  haptic_nudge_angle_deg: float
-  desired_blended_target_angle_deg: float
-  blended_target_angle_deg: float
+  target_spread_deg: float
   override_slewing: bool
-  raw_nudge_angle_deg: float
-  nudge_angle_deg: float
+  requested_correction_angle_deg: float
   wheel_velocity_deg_s: float
   relative_velocity_deg_s: float
   target_step_deg: float
@@ -112,7 +101,6 @@ class SteerAssistController:
 
   def update(self, input_data: SteerAssistInput) -> SteerAssistDecision:
     requested_active = input_data.model_target_angle_deg is not None
-    wheel_steering = steering_angle_to_g29_target(input_data.wheel_angle_deg)
     model_error_deg = (
       input_data.wheel_angle_deg - input_data.model_target_angle_deg
       if input_data.model_target_angle_deg is not None
@@ -133,15 +121,20 @@ class SteerAssistController:
       if requested_active
       else 0.0
     )
+    target_spread_deg = (
+      max(input_data.wheel_angle_deg, input_data.haptic_target_angle_deg, clipped_model_target_angle_deg)
+      - min(input_data.wheel_angle_deg, input_data.haptic_target_angle_deg, clipped_model_target_angle_deg)
+      if requested_active
+      else 0.0
+    )
 
     if requested_active and input_data.fresh:
       self._update_motion(input_data)
-      model_haptic_aligned = abs(model_haptic_delta_deg) <= self.config.tracking_error_deg
       self._update_detection(
         input_data.wheel_angle_deg,
         input_data.haptic_target_angle_deg,
         residual_angle_deg,
-        model_haptic_aligned,
+        target_spread_deg,
         input_data.now,
       )
     elif requested_active:
@@ -151,29 +144,14 @@ class SteerAssistController:
       self._reset_motion()
 
     active = requested_active and input_data.fresh and self._tracking_status == "override"
-    haptic_nudge_angle_deg = (
-      compute_nudge_angle_deg(
-        wheel_steering,
-        input_data.haptic_target_angle_deg,
-        inner_deadband_deg=self.config.inner_deadband_deg,
-        full_assist_error_deg=self.config.full_assist_error_deg,
-      )
-      if active
-      else 0.0
-    )
-    desired_blended_target_angle_deg = (
-      clip(input_data.haptic_target_angle_deg + haptic_nudge_angle_deg, -180.0, 180.0)
-      if active
-      else input_data.haptic_target_angle_deg
-    )
-    blended_target_angle_deg = (
+    requested_steering_angle_deg = (
       self._slew_override_target(
-        desired_blended_target_angle_deg,
+        clip(input_data.wheel_angle_deg, -180.0, 180.0),
         clipped_model_target_angle_deg,
         input_data.now,
       )
       if active
-      else input_data.haptic_target_angle_deg
+      else 0.0
     )
     if not active:
       self._override_slewing = False
@@ -181,15 +159,15 @@ class SteerAssistController:
       self._override_slew_target_angle_deg = None
       self._override_slew_complete = False
 
-    raw_nudge_angle_deg = (
-      blended_target_angle_deg - input_data.model_target_angle_deg
+    requested_correction_angle_deg = (
+      requested_steering_angle_deg - input_data.model_target_angle_deg
       if active and input_data.model_target_angle_deg is not None
       else 0.0
     )
     self._active = active
     return SteerAssistDecision(
       active=active,
-      requested_steering_angle_deg=blended_target_angle_deg if active else 0.0,
+      requested_steering_angle_deg=requested_steering_angle_deg,
       tracking_status=self._tracking_status,
       requested_active=requested_active,
       input_fresh=input_data.fresh,
@@ -200,12 +178,9 @@ class SteerAssistController:
       model_error_deg=model_error_deg,
       residual_angle_deg=residual_angle_deg,
       model_haptic_delta_deg=model_haptic_delta_deg,
-      haptic_nudge_angle_deg=haptic_nudge_angle_deg,
-      desired_blended_target_angle_deg=desired_blended_target_angle_deg,
-      blended_target_angle_deg=blended_target_angle_deg,
+      target_spread_deg=target_spread_deg,
       override_slewing=self._override_slewing,
-      raw_nudge_angle_deg=raw_nudge_angle_deg,
-      nudge_angle_deg=raw_nudge_angle_deg,
+      requested_correction_angle_deg=requested_correction_angle_deg,
       wheel_velocity_deg_s=self._wheel_velocity_deg_s,
       relative_velocity_deg_s=self._relative_velocity_deg_s,
       target_step_deg=self._target_step_deg,
@@ -302,13 +277,13 @@ class SteerAssistController:
     wheel_angle_deg: float,
     haptic_target_angle_deg: float,
     error_deg: float,
-    model_haptic_aligned: bool,
+    target_spread_deg: float,
     now: float,
   ) -> None:
     relative_velocity_deg_s = self._relative_velocity_deg_s
 
     if self._tracking_status not in ("tracking", "candidate", "override"):
-      if abs(error_deg) > self.config.tracking_error_deg:
+      if abs(error_deg) > self.config.position_tolerance_deg:
         self._reset_detection("disarmed")
         return
       if self._tracking_since is None:
@@ -320,7 +295,7 @@ class SteerAssistController:
 
     if self._tracking_status == "tracking":
       moving_outward = (
-        abs(error_deg) > self.config.inner_deadband_deg
+        abs(error_deg) > self.config.position_tolerance_deg
         and abs(self._wheel_velocity_deg_s) >= self.config.min_outward_velocity_deg_s
         and error_deg * self._wheel_velocity_deg_s > 0.0
       )
@@ -339,7 +314,7 @@ class SteerAssistController:
         candidate_error_deg = wheel_angle_deg - self._candidate_reference_angle_deg
         error_sign_changed = candidate_error_deg == 0.0 or math.copysign(1.0, candidate_error_deg) != self._candidate_error_sign
         self._candidate_evidence_s = max(0.0, now - self._candidate_since)
-        if abs(candidate_error_deg) <= self.config.inner_deadband_deg or error_sign_changed:
+        if abs(candidate_error_deg) <= self.config.position_tolerance_deg or error_sign_changed:
           self._tracking_status = "tracking"
           self._clear_candidate()
         elif self._candidate_evidence_s >= self.config.candidate_duration_s:
@@ -347,8 +322,7 @@ class SteerAssistController:
 
     if self._tracking_status == "override":
       release_ready = (
-        abs(error_deg) <= self.config.tracking_error_deg
-        and model_haptic_aligned
+        target_spread_deg <= self.config.position_tolerance_deg
         and abs(relative_velocity_deg_s) <= self.config.max_release_relative_velocity_deg_s
       )
       if not release_ready:
