@@ -479,6 +479,58 @@ Prerequisites:
 5. Reconnect USB and verify endpoints again.
 6. Return to `CFUN=1` only after the antenna check.
 
+#### Optional no-SIM RF smoke test
+
+The antennas can be installed before the SIM arrives, but the result has a
+strictly limited meaning. Quectel support notes that `QENG="servingcell"` data
+seen after SIM removal may be historical, and that current serving-cell radio
+values are normally available only when the modem is connected to or camped on
+a network. Without a SIM, the module cannot perform normal authenticated
+registration or establish a PDP/PPP data session.
+
+After attaching both LTE antennas while the board is unpowered, a cold-booted,
+bounded smoke test may do only this:
+
+```text
+verify CFUN=0 after reconnect
+explicitly set CFUN=1
+wait no more than 60 seconds for limited-service camping/search
+query CPIN, CEREG, CSQ, and QENG="servingcell"
+record any current LTE band/RSRP/RSRQ/RSSI/SINR response
+return to CFUN=0 in a finally/cleanup path
+```
+
+Do not change scan order, band masks, USB mode, APN, or persistent modem
+settings for this test. Do not run `COPS=?`, PPP, or throughput tests.
+
+Interpretation:
+
+- `SEARCH`, `LIMSRV`, unknown signal, or no serving-cell response is normal
+  without a SIM and does not condemn the antennas.
+- A plausible serving-cell response proves only that the receiver can observe
+  or retain a cell; it is not an antenna benchmark.
+- Do not compare antenna configurations by disconnecting RF leads while the
+  modem is powered.
+- Real antenna and link evaluation begins only after `AT+CPIN?` returns
+  `READY`, normal LTE registration succeeds, and RF metrics can be correlated
+  with PPP traffic.
+
+The current `+CME ERROR: 13` formally means `SIM failure` in Quectel's EC25 AT
+manual. Since the SIM is physically absent and `QSIMSTAT` also reports absent,
+it is recorded as part of the present no-SIM state. If error 13 remains after a
+known-good SIM is inserted, stop and troubleshoot the SIM socket/detection
+before any network testing.
+
+References:
+
+- Quectel EC25 Series Hardware Design V2.4, including `ANT_MAIN`, `ANT_DIV`,
+  and default-enabled receive diversity:
+  <https://quectel.com/content/uploads/2024/02/Quectel_EC25_Series_Hardware_Design_V2.4-4.pdf>
+- Quectel EC25/EC21 AT Commands Manual V1.3, including CME error codes:
+  <https://quectel.com/content/uploads/2021/03/Quectel_EC25EC21_AT_Commands_Manual_V1.3.pdf>
+- Quectel support discussion of retained serving-cell data without a SIM:
+  <https://forums.quectel.com/t/at-qeng-servingcell-responds-with-details-even-when-no-sim/12244>
+
 An optional short ModemManager/NetworkManager connection can separate RF, SIM,
 APN, and carrier-provisioning problems from bugs in the new service. It is a
 diagnostic baseline, not the production bearer decision. If ownership or QMI
