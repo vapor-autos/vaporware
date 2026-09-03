@@ -739,6 +739,160 @@ After the test, the original EG916Q-GL all-band mask
 `0x2000001e20b0e18df` was restored and read back, PPP returned to `CONNECTED`,
 and the rollback timer was canceled. The modem naturally reselected Band 66.
 
+### Reconciling the iperf baseline with full-stack WebRTC
+
+The approximately 4 Mbps iperf uplink result is not inconsistent with the
+roughly 1.5 Mbps observed during a usable full-stack run. The measurements are
+at different operating points and include different traffic.
+
+The live UGV was verified on `steer-assist-phase-2` commit `59361a666`, whose
+transport layout is newer than the master-based EC25 development branch:
+
+```text
+two H264 camera tracks       -> WebRTC/SRTP over the selected ICE path
+UGV UI/model feedback        -> packed/framed UDP over Tailscale
+high-rate G29/assist state   -> packed UDP over Tailscale
+one-shot commands/settings   -> reliable WebRTC SCTP
+```
+
+The active GCS configuration requests `wideRoad,driver` at `low` quality plus
+the `ui_model,steer_assist` feedback profiles. WebRTC quality values are
+**per active camera**, because `LivestreamEncoderBitrate` applies to every
+livestream encoder:
+
+```text
+low:     0.5 Mbps per camera
+medium:  1.5 Mbps per camera
+high:    5.0 Mbps per camera by default
+```
+
+Therefore, `medium` with two cameras asks for about 3 Mbps of video, not 1.5
+Mbps total. The current fixed `low` request asks for about 1 Mbps of video and
+disables the loss controller's automatic quality selection for that session.
+
+A 27-minute producer-written GCS capture from 2026-09-02
+(`00000168--0f590f4eb8`) confirms the current low-quality video load:
+
+| WebRTC video measurement | Result |
+| --- | ---: |
+| Two-camera RTP payload average | 0.989 Mbps |
+| Complete WebRTC transport average | 1.035 Mbps |
+| Transport p50 / p90 / p99 | 1.041 / 1.077 / 1.182 Mbps |
+| Maximum two-second transport sample | 1.319 Mbps |
+| RTCP NACK feedback | 382 requests covering 1,775 packet numbers |
+| PLI / final cumulative packet loss | 0 / 0 |
+
+The zero final loss does not mean the path was loss-free. NACK retransmission
+repaired late/missing RTP packets, which preserves throughput but can still
+produce a visible pause and additional queueing delay.
+
+The current WebRTC capture excludes the independent UDP UI-feedback path.
+During the 2026-09-02 full-stack tests, feedback was about 0.54-0.58 Mbps before
+`controlsState` was restored from an experimental 50 Hz target to 20 Hz. That
+change reduced its measured contribution from about 170 kbps to 88 kbps, which
+puts the comparable post-change feedback estimate around 0.46-0.50 Mbps.
+Together with the measured 1.035 Mbps video transport, the application traffic
+is approximately 1.50-1.54 Mbps before outer UDP/IP/WireGuard overhead. That
+matches the observed full-stack rate; it is the selected workload, not proof
+that the modem cannot exceed 1.5 Mbps. This is the best synchronized historical
+decomposition available, but an exact current on-wire total still requires
+capturing `ppp0` counters during the same active session.
+
+There are smaller background consumers too. The normal `uploader` process is
+running and metered-network policy still permits completed `qlog.zst` files.
+Current files are about 231 KB per one-minute segment, equivalent to about 31
+kbps averaged over a minute if uploaded continuously, but they arrive as short
+TCP bursts and can briefly compete with real-time media. Athena, Tailscale, and
+SSH also contribute. A quiet 30-second PPP sample with no GCS session measured
+only 2.1 kbps uplink, so steady idle traffic is not the main limit; burst
+competition is the concern.
+
+#### Why WebRTC RTT can exceed the idle ping
+
+The paths in the compared captures are not identical:
+
+```text
+iperf/ping test:
+  UGV 100.67.29.97 -> GCS 100.99.187.99
+  direct Tailscale/WireGuard path, no DERP
+
+recent WebRTC video capture:
+  GCS 192.168.50.17:38674 host candidate
+  UGV 74.254.84.113:39399 server-reflexive candidate
+  direct ICE/STUN path, no TURN relay and not Tailscale
+```
+
+A same-minute idle check on Band 66 measured 53.2 ms average RTT over
+Tailscale. The GCS public endpoint did not answer ICMP, so a simultaneous idle
+ICMP A/B against the exact ICE underlay is not available.
+
+That path difference can move the latency, but it is not the main explanation
+for the oldest 100-180 ms WebRTC samples. The two reported RTTs also have
+different semantics:
+
+- The 44-56 ms values were small ICMP packets sent once per second while the
+  uplink was idle.
+- WebRTC `roundTripTime` is calculated from RTCP sender/receiver reports while
+  video is actively filling the LTE uplink. aiortc applies an EWMA with
+  `alpha=0.85`, so a queueing episode remains visible for several samples.
+- RTP jitter is packet arrival variation in the 90 kHz video clock. It is not
+  the standard deviation of ping RTT and should not be compared directly to
+  ping `mdev`.
+
+The newer full-stack evidence supports queueing/RF rather than a relay penalty:
+
+- On weak Band 2 (`RSRP -92` to `-93`, `SINR 1-6`), WebRTC RTT reached
+  129-146 ms, jitter reached 52-56 ms, and one interval lost 15.7%.
+- After the modem returned to stronger Band 66 (`RSRP -84`, `SINR 13-14`), the
+  same two low-quality cameras showed 49-78 ms RTT, 8-11 ms jitter, and zero
+  interval loss.
+- The controlled idle Band 66 ping averaged 56 ms. The healthy loaded WebRTC
+  range overlaps it, showing that WebRTC or ICE does not inherently double the
+  RTT.
+
+#### Why visible trouble starts below the 4 Mbps speed-test ceiling
+
+The 4 Mbps figure is a throughput ceiling, not a safe real-time operating
+budget:
+
+1. TCP iperf tolerates retransmission and queue growth. It delivered about 4
+   Mbps despite roughly 53-56 retransmissions in 20 seconds.
+2. UDP already showed the real-time margin: 4.5 Mbps offered produced 5.8-7.7%
+   loss, and Band 66 showed measurable loss even at 2.25 Mbps in this sample.
+3. Two medium-quality cameras plus current feedback would request roughly 3.5
+   Mbps before outer overhead, leaving very little room below the measured
+   ceiling. Three low-quality cameras plus feedback are already around 2 Mbps.
+4. H264 uses a GOP of five frames at 20 fps, producing frequent keyframe bursts
+   rather than perfectly smooth average traffic. NACK retransmits add more
+   bursts after loss.
+5. Cellular scheduling, RF, and carrier congestion vary moment to moment. A
+   mean rate below capacity can still overrun the queue during a short fade,
+   keyframe, retransmission wave, or `qlog` upload.
+
+Older notes that report 1.1-1.4 Mbps of JSON feedback and 2.1-3.3 Mbps inside
+the WebRTC transport predate the packed independent-UDP feedback design. Do
+not use those numbers as the current steady-state split, though they remain
+useful evidence for why the former reliable SCTP feedback channel stalled.
+
+#### Next controlled full-stack measurement
+
+Repeat the following on each forced LTE band before moving the SIM:
+
+1. Run the normal GCS manager and deployed UGV stack for at least ten minutes.
+2. Record start/end and periodic `ppp0` byte counters for the true total
+   on-wire cellular rate; correlate them with existing GCS/UGV producer files.
+3. Keep a one-packet-per-second Tailscale ping running during the video session
+   and compare it with RTCP RTT. This separates load/bufferbloat from path and
+   metric-definition differences.
+4. Record WebRTC transport bitrate, per-camera RTP bitrate, feedback UDP bytes,
+   NACK/PLI/loss/jitter, band/cell/RSRP/RSRQ/SINR, and completed qlog uploads.
+5. Test two cameras at low first, then three cameras at low. Test two cameras
+   at medium only if the prior step remains clean.
+
+For the later EC25 comparison, repeat the identical full-stack matrix as well
+as iperf. The decision metric is bounded RTT/loss and uninterrupted UI/control
+feedback at the target camera load, not maximum bulk TCP throughput.
+
 ### Phase 8: Optional QMI comparison
 
 Implement or benchmark a QMI backend only if the PPP results show a reason:
