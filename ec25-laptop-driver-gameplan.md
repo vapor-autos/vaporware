@@ -739,6 +739,84 @@ After the test, the original EG916Q-GL all-band mask
 `0x2000001e20b0e18df` was restored and read back, PPP returned to `CONNECTED`,
 and the rollback timer was canceled. The modem naturally reselected Band 66.
 
+### Laptop EC25 PPP performance baseline (2026-09-03)
+
+The same AT&T SIM was moved from the comma four into the laptop EC25-AFXD.
+After correcting the physical SIM orientation, the modem reported `CPIN:
+READY`, registered home on AT&T `310410`, and attached to packet service. CID 1
+already contained the `broadband` APN. ModemManager was stopped temporarily so
+it could not race the PPP data port, and PPP was dialed on `/dev/ttyUSB3` with
+`ATD*99***1#`, CHAP, MTU/MRU 1500, and the existing CID 1 context.
+
+The laptop's Ethernet default route remained metric 100 throughout. A
+secondary PPP default was added at metric 700, and every measurement command
+was explicitly bound to `ppp0`. Ordinary laptop, GCS, and Tailscale traffic
+therefore continued over Ethernet. The EC25 assigned working IPv4 and IPv6
+addresses through PPP; the nominal `460800` USB-serial line setting was not a
+throughput cap.
+
+The EC25 selected the same AT&T Band 2 cell used for the comma Band 2 baseline:
+EARFCN 650, PCI 218, cell `1B3490A`. During the EC25 run, RSRP was -70 to -69
+dBm, RSRQ -8 to -11 dB, RSSI -44 to -38 dBm, and SINR 17-19 dB. Reported
+temperatures at the end were 37/34/34 C.
+
+This laptop cannot test the EC25 back to itself at the GCS Tailscale address.
+The EC25 measurements therefore used public New York endpoints: Cloudflare
+EWR for bounded HTTP transfers and `nyc.speedtest.clouvider.net`,
+`spd-uswb.hostkey.com`, and `speedtest.nyc1.us.leaseweb.net` for iperf3. The
+endpoint and transport-path difference means this is not yet the final
+apples-to-apples UGV-to-GCS test, but the observed margin is much larger than
+that limitation.
+
+| EC25 PPP bulk measurement | Result |
+| --- | ---: |
+| Cloudflare download, 10 MB | 15.8 Mbps |
+| Leaseweb TCP download, 10 s | 21.6 Mbps receiver |
+| Cloudflare upload, 5 MB | 15.1 Mbps |
+| Cloudflare upload, 20 MB | 16.4 Mbps |
+| Clouvider TCP upload, 5 s | 17.3 Mbps receiver; 49 retransmits |
+| Hostkey TCP upload, 5 s | 18.2 Mbps receiver; 77 retransmits |
+
+The Cloudflare 20 MB upload ran with a simultaneous PPP-bound ping. It
+sustained 16.4 Mbps while the complete ping window remained at 0% loss, 47.0
+ms average RTT, and 133.8 ms maximum RTT. A separate clean idle window measured
+0% loss, 46.7 ms average, and 81.8 ms maximum. Other idle windows did contain
+sporadic 180-660 ms cellular scheduling spikes, so the short clean windows do
+not establish a long-term latency guarantee.
+
+| UDP offered | Receiver throughput | Loss | Jitter | Simultaneous ping over complete window |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 Mbps | 0.990 Mbps | 0 / 690, 0% | 7.78 ms | not recorded |
+| 4.5 Mbps | 4.46 Mbps | 2 / 3,883, 0.052% | 3.12 ms | not recorded |
+| 8 Mbps | 7.93 Mbps | 0 / 6,902, 0% | 1.37 ms | not recorded |
+| 12 Mbps | 11.9 Mbps | 0 / 10,352, 0% | 0.92 ms | 0% loss; 38.2 ms avg; 129.1 ms max |
+| 16 Mbps | 15.9 Mbps | 16 / 13,811, 0.12% | 0.52 ms | 0% loss; 41.5 ms avg; 118.6 ms max |
+| 20 Mbps | 18.4 Mbps | 997 / 17,263, 5.8% | 0.75 ms | 2.78% loss; 105.8 ms avg; 182.8 ms max |
+
+The EC25 remained effectively clean through 12 Mbps. At 16 Mbps, all 16
+missing datagrams occurred in the first reported second and the remaining
+nine seconds were loss-free. The clear saturation point appeared at 20 Mbps:
+receiver throughput flattened at 18.4 Mbps, UDP loss reached 5.8%, and loaded
+ping latency and loss increased materially. The useful short-window real-time
+ceiling at this cell was therefore approximately 16-18 Mbps.
+
+For comparison, the internal EG916Q delivered only 4.07-4.20 Mbps at 4.5 Mbps
+offered while losing 5.8-7.7%. The EC25 delivered the same 4.5 Mbps load with
+0.052% loss, then delivered 8 and 12 Mbps with no loss. Its measured TCP
+uplink was approximately 3.7-4.4 times the internal modem's 3.96-4.17 Mbps,
+and its clean UDP operating region was roughly four times larger. This is
+direct evidence that EC25-over-PPP can exploit the Cat 4 headroom; QMI is not
+required for the present 3.5-4 Mbps WebRTC workload.
+
+These numbers strongly predict that the EC25 will move the two-camera WebRTC
+queueing/loss knee upward, but they do not replace the final full-stack test.
+The decisive validation is to connect the EC25 directly to the UGV, repeat
+the same UGV-to-GCS WebRTC ladder with driving feedback active, and confirm
+NACK/PLI and RTCP RTT rather than relying on raw throughput alone.
+
+The test ended with the root-owned PPP service stopped, `ppp0` and its metric
+700 route removed, ModemManager restored, and Ethernet/Tailscale still online.
+
 ### Reconciling the iperf baseline with full-stack WebRTC
 
 The approximately 4 Mbps iperf uplink result is not inconsistent with the
