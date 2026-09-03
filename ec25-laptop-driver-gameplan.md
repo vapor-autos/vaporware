@@ -874,7 +874,75 @@ the WebRTC transport predate the packed independent-UDP feedback design. Do
 not use those numbers as the current steady-state split, though they remain
 useful evidence for why the former reliable SCTP feedback channel stalled.
 
-#### Next controlled full-stack measurement
+#### 2026-09-03 controlled Band 66 full-stack ladder
+
+The first synchronized bitrate ladder was completed on 2026-09-03 before
+moving the SIM. The laptop ran the normal GCS manager and the UGV ran deployed
+commit `59361a666`. No extra Cereal/msgq subscriber or manager PTY was attached.
+The test used the two configured cameras (`wideRoad,driver`), changed the typed
+`LivestreamEncoderBitrate` parameter live, allowed ten seconds to settle, and
+held each point for approximately 50 seconds. The setting is per camera.
+
+All points remained on Band 66, EARFCN 67086, PCI 218. RSRP stayed between
+-75 and -72 dBm and median SINR was 24.5-26 dB, so neither a band change nor
+weak RF explains the differences. ICE selected a direct UDP pair from the GCS
+LAN host candidate to the UGV's server-reflexive public candidate; video did
+not use Tailscale or a TURN relay. GCS and UGV producer-written two-second
+WebRTC records were correlated with the modem driver's `ppp0` byte counter.
+
+| Requested bitrate per camera | Encoder RTP payload, both cameras | GCS WebRTC receive | Total `ppp0` uplink | RTCP RTT avg / p90 / max | RTP jitter avg / max | Positive loss deltas | NACK packet requests | PLI |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 kbps | 0.999 Mbps | 1.039 Mbps | 1.306 Mbps | 48.9 / 53.6 / 56.9 ms | 11.4 / 15.7 ms | 0 | 16 | 0 |
+| 750 kbps | 1.502 Mbps | 1.554 Mbps | 1.725 Mbps | 50.0 / 56.8 / 62.5 ms | 14.6 / 18.7 ms | 0 | 143 | 0 |
+| 1,000 kbps | 2.004 Mbps | 2.069 Mbps | 2.357 Mbps | 56.0 / 64.6 / 67.6 ms | 20.1 / 115.0 ms | 324 | 2,987 | 4 |
+| 1,250 kbps | 2.518 Mbps | 2.659 Mbps | 2.737 Mbps | 57.9 / 75.7 / 92.7 ms | 19.0 / 37.6 ms | 25 | 2,266 | 3 |
+| 1,500 kbps | 3.025 Mbps | 3.258 Mbps | 3.469 Mbps | 75.8 / 99.4 / 136.0 ms | 25.2 / 48.6 ms | 148 | 5,458 | 11 |
+
+`Positive loss deltas` sums the increases reported in each two-second
+receiver sample. Packets that arrive late after NACK repair can reduce the
+later cumulative loss value, so this column describes transient missing RTP,
+not final unrecovered loss. A NACK can also request the same missing packet
+more than once; `NACK packet requests` is repair work, not a unique-loss count.
+
+The encoder achieved every requested aggregate rate and total PPP egress rose
+from 1.306 to 3.469 Mbps. This directly disproves a fixed 1.5 Mbps modem or
+full-stack cap. It also locates a practical real-time knee in this short run:
+750 kbps per camera remained clean apart from light NACK repair, while every
+point at or above 1,000 kbps per camera produced PLI, heavy NACK activity, or
+materially higher RTT/jitter. The lower raw loss count at 1,250 than at 1,000
+is normal short-window LTE variability, not evidence that the higher rate is
+safer; its repair traffic and p90 RTT remained elevated.
+
+This result also explains why the approximately 4.17 Mbps Band 66 TCP iperf
+number is not a safe video target. The highest ladder point consumed 3.469
+Mbps, about 83% of that bulk TCP result, yet RTCP RTT was already 27 ms higher
+on average than at low quality and repair demand was substantial. TCP reports
+useful bytes after retransmission and tolerates queueing. Two bursty H264
+streams need headroom for keyframes, RTP repair, cellular scheduling changes,
+feedback, and background uploads.
+
+One limitation matters when calling this a full driving-stack result. The
+normal GCS and UGV processes were running, but the UGV feedback counters showed
+only `deviceState`, `pandaStates`, `roadCameraState`, and
+`wideRoadCameraState` producing data during the stationary test. Their packed
+payload averaged about 25 kbps. `carState`, `controlsState`, `selfdriveState`,
+`modelV2`, and the remaining driving services sent zero bytes in this window.
+Consequently, the 1.306 Mbps low-quality PPP result is the true total for this
+stationary full-stack session, but not the final moving/engaged total. Adding
+the historical post-50-Hz feedback estimate predicts roughly another
+0.44-0.48 Mbps of application payload during a real drive, before its outer
+headers. The producer metrics should be used to measure that delta during the
+next normal route without adding a live message subscriber.
+
+For the internal modem, 500 kbps per camera remains the conservative fixed
+production point. The 750 kbps point is a credible longer-route candidate,
+but this 50-second result is too short to promote it. Fixed settings at or
+above 1,000 kbps per camera do not preserve enough real-time margin even under
+the excellent Band 66 RF observed here. The test ended with
+`LivestreamEncoderBitrate=500000`, the temporary GCS manager stopped, and the
+UGV still connected on Band 66.
+
+#### Remaining moving-route measurement
 
 Repeat the following on each forced LTE band before moving the SIM:
 
