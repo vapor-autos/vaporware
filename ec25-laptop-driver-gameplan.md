@@ -701,6 +701,44 @@ comparison. At this location and time, Band 66 was substantially cleaner than
 Band 2 for both devices, but the next fair data-path comparison still requires
 a provisioned SIM in the EC25 and PPP measurements on the same carrier.
 
+### Comma-to-GCS Band 2/Band 66 throughput baseline (2026-09-03)
+
+Before moving the active AT&T SIM, we measured the comma four's internal
+EG916Q-GL/PPP path to the GCS at `100.99.187.99`. Tailscale reported a direct
+peer path rather than DERP. Each band used the same UGV, SIM, antennas, GCS,
+test order, and `iperf3` durations. Band selection was forced with the masks
+above, with a ten-minute automatic all-band rollback armed for Band 66.
+
+| Measurement | Band 2 | Band 66 |
+| --- | ---: | ---: |
+| AT&T cell | EARFCN 650 / PCI 218 / `1B3490A` | EARFCN 67086 / PCI 218 / `1B34918` |
+| RF at test start (RSRP / RSRQ / RSSI / SINR dB) | -82 / -8 / -56 / 14 | -74 / -10 / -46 / 23 |
+| RF at test end (RSRP / RSRQ / RSSI / SINR dB) | -81 / -7 / -57 / 14 | -75 / -6 / -51 / 25 |
+| Idle ping, 20 packets | 0% loss; 44.4 ms avg; 5.9 ms mdev | 0% loss; 56.0 ms avg; 12.2 ms mdev |
+| TCP uplink, 20 s (receiver) | 3.96 Mbps; 56 retransmits | 4.17 Mbps; 53 retransmits |
+| TCP downlink, 20 s (receiver) | 7.71 Mbps; 2 sender retransmits | 8.28 Mbps; 5 sender retransmits |
+| UDP uplink, 1 Mbps offered | 0.997 Mbps; 0% loss; 5.99 ms jitter | 0.989 Mbps; 0% loss; 10.87 ms jitter |
+| UDP uplink, 2.25 Mbps offered | 2.24 Mbps; 0% loss; 2.95 ms jitter | 2.24 Mbps; 0.35% loss; 1.58 ms jitter |
+| UDP uplink, 4.5 Mbps offered | 4.07 Mbps; 7.7% loss; 1.39 ms jitter | 4.20 Mbps; 5.8% loss; 1.85 ms jitter |
+| Modem temperature | 46-47 C | 45-48 C |
+
+Band 66 delivered about 5% more TCP uplink and 7% more TCP downlink, and lost
+fewer packets at the overloaded 4.5 Mbps UDP point. Band 2 had the better idle
+latency: 11.7 ms lower average RTT and roughly half the RTT variation. Both
+bands carried 1 Mbps without loss. Band 2 also carried the 2.25 Mbps UDP point
+without loss, while Band 66 lost 0.35%, so neither band is an unconditional
+winner for the current video workload.
+
+The useful production baseline is approximately 4.0-4.2 Mbps sustained uplink
+and 7.7-8.3 Mbps downlink through the internal modem, with clean 1 Mbps UDP on
+either band. This is a band comparison, not yet an EC25 data-path comparison.
+Move the same SIM to the EC25 and repeat this exact matrix over PPP before
+attributing any throughput gain to the EC25's stronger Band 66 RF results.
+
+After the test, the original EG916Q-GL all-band mask
+`0x2000001e20b0e18df` was restored and read back, PPP returned to `CONNECTED`,
+and the rollback timer was canceled. The modem naturally reselected Band 66.
+
 ### Phase 8: Optional QMI comparison
 
 Implement or benchmark a QMI backend only if the PPP results show a reason:
