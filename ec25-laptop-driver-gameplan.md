@@ -654,6 +654,53 @@ against a speed-test headline.
 If EC25-over-PPP meets the real WebRTC targets with acceptable recovery and
 CPU use, keep PPP and stop here. Simpler production behavior is a valid win.
 
+### Controlled no-SIM RF comparison (2026-09-03)
+
+With both LTE antennas attached to the EC25 carrier board, we collected three
+time-adjacent `QENG="servingcell"` samples from the laptop EC25-AFXD and the
+comma four's internal EG916Q-GL on each target band. The EC25 had no SIM and
+therefore camped in limited-service mode; the comma was registered to AT&T and
+connected through PPP.
+
+Natural reselection repeatedly put the EC25 on Band 2 and the comma on Band
+66. For a controlled comparison, temporarily restrict each modem with
+`AT+QCFG="band"`. Quectel band-mask writes must omit the `0x` prefix even
+though query responses include it. The original masks were recorded first:
+
+```text
+EC25-AFXD:  band=0x260, LTE=0x42000000000000381a, TDS=0x0
+EG916Q-GL:  band=0x0,   LTE=0x2000001e20b0e18df
+Band 2:     LTE mask 2
+Band 66:    LTE mask 20000000000000000
+```
+
+The comma Band 2 test used an on-device four-minute rollback timer so loss of
+the cellular SSH path could not leave a persistent restricted mask. Both
+original masks were restored and read back after testing, the rollback timer
+was canceled, the comma returned to `CONNECTED`, and the EC25 returned to
+`CFUN=0`.
+
+Three-sample averages:
+
+| Band | Modem | PLMN / EARFCN / PCI | State | RSRP dBm | RSRQ dB | RSSI dBm | SINR dB |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 66 | EC25-AFXD | 310410 / 67086 / 218 | limited service | -72.0 | -9.7 | -44.3 | 28.0 |
+| 66 | EG916Q-GL | 310410 / 67086 / 218 | registered/PPP | -75.7 | -8.3 | -49.7 | 20.7 |
+| 2 | EC25-AFXD | 311480 / 1100 / 267 | limited service | -74.0 | -9.0 | -44.3 | 13.3 |
+| 2 | EG916Q-GL | 310410 / 650 / 218 | registered/PPP | -81.7 | -10.0 | -54.0 | 14.0 |
+
+The Band 66 comparison is the cleanest RF A/B: both modems selected the same
+PLMN, EARFCN, PCI, and cell ID (`1B34918`). The EC25 measured about 3.7 dB
+better RSRP, 5.3 dB stronger RSSI, and 7.3 dB better SINR; the comma measured
+about 1.3 dB better RSRQ.
+
+The Band 2 samples only match frequency band, not carrier or cell. The EC25
+camped on PLMN 311480 while the comma registered to AT&T PLMN 310410, so the
+apparent EC25 advantage in RSRP/RSSI is not a controlled modem-or-antenna
+comparison. At this location and time, Band 66 was substantially cleaner than
+Band 2 for both devices, but the next fair data-path comparison still requires
+a provisioned SIM in the EC25 and PPP measurements on the same carrier.
+
 ### Phase 8: Optional QMI comparison
 
 Implement or benchmark a QMI backend only if the PPP results show a reason:
