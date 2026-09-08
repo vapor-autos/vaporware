@@ -8,7 +8,6 @@ from openpilot.tools.turbo.webrtc_controls import (
   CONTROL_PACKET_MAGIC,
   CerealDataChannelReceiver,
   FeedbackPacketReassembler,
-  LEGACY_FEEDBACK_PACKET_MAGIC,
   create_feedback_data_channel,
   encode_feedback_packets,
   expand_feedback_services,
@@ -214,24 +213,6 @@ def test_cereal_data_channel_receiver_reassembles_framed_feedback():
   msg = messaging.new_message("carState", valid=True, logMonoTime=123)
   msg.carState.vEgo = 4.25
   packets = encode_feedback_packets(msg.to_bytes_packed(), message_id=123)
-
-  for packet in reversed(packets):
-    assert receiver.receive(packet)
-
-  assert len(pm.sent) == 1
-  assert pm.sent[0][1].carState.vEgo == 4.25
-
-
-def test_cereal_data_channel_receiver_accepts_legacy_framed_json_feedback():
-  pm = FakePubMaster()
-  receiver = CerealDataChannelReceiver(["carState"], pm=pm)
-  payload = json.dumps({
-    "type": "carState",
-    "logMonoTime": 123,
-    "valid": True,
-    "data": {"vEgo": 4.25},
-  }).encode()
-  packets = encode_feedback_packets(payload, message_id=123, magic=LEGACY_FEEDBACK_PACKET_MAGIC)
 
   for packet in reversed(packets):
     assert receiver.receive(packet)

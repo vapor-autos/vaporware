@@ -5,7 +5,6 @@ import socket
 import struct
 import time
 from typing import Any
-import zlib
 
 import capnp
 
@@ -13,7 +12,6 @@ from openpilot.cereal import log, messaging
 
 
 FEEDBACK_DATA_CHANNEL_LABEL = "feedback"
-LEGACY_FEEDBACK_PACKET_MAGIC = b"TFB1"
 FEEDBACK_PACKET_MAGIC = b"TFB2"
 CONTROL_PACKET_MAGIC = b"TCB1"
 FEEDBACK_PACKET_PAYLOAD_SIZE = 1000
@@ -35,22 +33,13 @@ def create_feedback_data_channel(peer_connection, message_handler):
   return channel
 
 
-def encode_feedback_packets(
-  payload: bytes,
-  message_id: int,
-  magic: bytes = FEEDBACK_PACKET_MAGIC,
-) -> list[bytes]:
-  if magic == LEGACY_FEEDBACK_PACKET_MAGIC:
-    payload = zlib.compress(payload, level=1)
-  elif magic != FEEDBACK_PACKET_MAGIC:
-    raise ValueError("unknown feedback packet format")
-
+def encode_feedback_packets(payload: bytes, message_id: int) -> list[bytes]:
   chunks = [
     payload[offset:offset + FEEDBACK_PACKET_PAYLOAD_SIZE]
     for offset in range(0, len(payload), FEEDBACK_PACKET_PAYLOAD_SIZE)
   ] or [b""]
   return [
-    _FEEDBACK_PACKET_HEADER.pack(magic, message_id & 0xFFFFFFFF, index, len(chunks)) + chunk
+    _FEEDBACK_PACKET_HEADER.pack(FEEDBACK_PACKET_MAGIC, message_id & 0xFFFFFFFF, index, len(chunks)) + chunk
     for index, chunk in enumerate(chunks)
   ]
 
@@ -63,39 +52,38 @@ class FeedbackPacketReassembler:
   ):
     self.timeout_s = timeout_s
     self.max_pending_messages = max_pending_messages
-    self.pending: dict[tuple[bytes, int], tuple[float, int, dict[int, bytes]]] = {}
+    self.pending: dict[int, tuple[float, int, dict[int, bytes]]] = {}
 
   def add(self, packet: bytes, now: float | None = None) -> bytes | None:
     if len(packet) < _FEEDBACK_PACKET_HEADER.size:
       raise ValueError("feedback packet is shorter than its header")
 
     magic, message_id, index, count = _FEEDBACK_PACKET_HEADER.unpack_from(packet)
-    if magic not in (FEEDBACK_PACKET_MAGIC, LEGACY_FEEDBACK_PACKET_MAGIC) or count == 0 or index >= count:
+    if magic != FEEDBACK_PACKET_MAGIC or count == 0 or index >= count:
       raise ValueError("invalid feedback packet header")
 
     now = time.monotonic() if now is None else now
     self._expire(now)
-    message_key = (magic, message_id)
-    pending = self.pending.get(message_key)
+    pending = self.pending.get(message_id)
     if pending is None or pending[1] != count:
       if len(self.pending) >= self.max_pending_messages:
-        oldest_key = min(self.pending, key=lambda pending_key: self.pending[pending_key][0])
+        oldest_key = min(self.pending, key=lambda pending_id: self.pending[pending_id][0])
         del self.pending[oldest_key]
       pending = (now, count, {})
-      self.pending[message_key] = pending
+      self.pending[message_id] = pending
 
     pending[2][index] = packet[_FEEDBACK_PACKET_HEADER.size:]
     if len(pending[2]) != count:
       return None
 
     payload = b"".join(pending[2][chunk_index] for chunk_index in range(count))
-    del self.pending[message_key]
-    return zlib.decompress(payload) if magic == LEGACY_FEEDBACK_PACKET_MAGIC else payload
+    del self.pending[message_id]
+    return payload
 
   def _expire(self, now: float) -> None:
-    expired = [message_key for message_key, pending in self.pending.items() if now - pending[0] > self.timeout_s]
-    for message_key in expired:
-      del self.pending[message_key]
+    expired = [message_id for message_id, pending in self.pending.items() if now - pending[0] > self.timeout_s]
+    for message_id in expired:
+      del self.pending[message_id]
 
 
 UI_SMOKE_FEEDBACK_SERVICES = [
@@ -268,18 +256,15 @@ class CerealDataChannelReceiver:
     self.reassembler = FeedbackPacketReassembler()
 
   def receive(self, message: bytes | str) -> bool:
-    if isinstance(message, bytes) and message.startswith((FEEDBACK_PACKET_MAGIC, LEGACY_FEEDBACK_PACKET_MAGIC)):
-      packet_magic = message[:4]
+    if isinstance(message, bytes) and message.startswith(FEEDBACK_PACKET_MAGIC):
       try:
         assembled = self.reassembler.add(message)
-      except (ValueError, zlib.error):
+      except ValueError:
         self.ignored += 1
         return False
       if assembled is None:
         return True
-      if packet_magic == FEEDBACK_PACKET_MAGIC:
-        return self._receive_packed(assembled)
-      message = assembled
+      return self._receive_packed(assembled)
 
     if isinstance(message, bytes) and message.startswith(CONTROL_PACKET_MAGIC):
       return self._receive_packed(message[len(CONTROL_PACKET_MAGIC):])
