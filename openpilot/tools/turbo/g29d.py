@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+import contextlib
 from dataclasses import dataclass
+import json
+import os
 import time
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import g29_steering_to_angle_deg, steering_angle_to_g29_target
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistDecision, SteerAssistInput
-from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, write_metrics_payload
+from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool, write_metrics_payload
 
 RETRY_DELAY = 2.0
 PUBLISH_RATE_HZ = 50
@@ -23,12 +26,62 @@ STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S = 180.0
 STEER_ASSIST_HAPTIC_FORCE = 0.4
 STEER_ASSIST_HAPTIC_FRICTION = 0.25
 STEER_ASSIST_METRICS_NAME = "g29-steer-assist"
+STEER_ASSIST_TRACE_ENV = "TURBO_STEER_ASSIST_TRACE"
+STEER_ASSIST_TRACE_FILE_ENV = "TURBO_STEER_ASSIST_TRACE_FILE"
+STEER_ASSIST_TRACE_FLUSH_INTERVAL_S = 1.0
 TELEOP_COMMAND_BY_CONTROL = {
   "up": "headlightsOn",
   "down": "headlightsOff",
   "L3": "cruiseEnable",
   "L2": "cruiseCancel",
 }
+
+
+class SteerAssistTraceWriter:
+  def __init__(self, path: str, flush_interval_s: float = STEER_ASSIST_TRACE_FLUSH_INTERVAL_S):
+    self.path = path
+    self.flush_interval_s = max(0.0, flush_interval_s)
+    self.last_flush_time: float | None = None
+    self.file = None
+    try:
+      directory = os.path.dirname(path)
+      if directory:
+        os.makedirs(directory, exist_ok=True)
+      self.file = open(path, "a")
+    except OSError as e:
+      print(f"g29d steering trace disabled: {e}", flush=True)
+
+  @property
+  def enabled(self) -> bool:
+    return self.file is not None
+
+  def write(self, payload: dict, now: float) -> None:
+    if self.file is None:
+      return
+    try:
+      self.file.write(json.dumps(payload, sort_keys=True) + "\n")
+      if self.last_flush_time is None or now - self.last_flush_time >= self.flush_interval_s:
+        self.file.flush()
+        self.last_flush_time = now
+    except (OSError, TypeError, ValueError) as e:
+      print(f"g29d steering trace disabled: {e}", flush=True)
+      self.close()
+
+  def close(self) -> None:
+    if self.file is None:
+      return
+    with contextlib.suppress(OSError):
+      self.file.flush()
+      self.file.close()
+    self.file = None
+
+
+def _make_steer_assist_trace_writer() -> SteerAssistTraceWriter | None:
+  if not env_bool(STEER_ASSIST_TRACE_ENV):
+    return None
+  path = os.getenv(STEER_ASSIST_TRACE_FILE_ENV) or default_metrics_jsonl_path("g29-steer-assist-trace")
+  writer = SteerAssistTraceWriter(path)
+  return writer if writer.enabled else None
 
 
 def _clip(value: float, lo: float, hi: float) -> float:
@@ -319,6 +372,78 @@ class SteerAssistPublisher:
     return decision
 
 
+def _steer_assist_diagnostics(
+  state: dict,
+  feedback: AssistFeedback,
+  decision: SteerAssistDecision,
+  command,
+  velocity_m_s: float,
+  speed_source: str,
+  carstate_age_s: float | None,
+  limited_target_angle_deg: float | None,
+  haptic_target_angle_deg: float,
+  sequence: int,
+  loop_interval_s: float | None,
+) -> dict:
+  model_target_angle_deg = feedback.model_angle_deg
+  return {
+    "requested_active": decision.requested_active,
+    "engaged": feedback.engaged,
+    "target_source": feedback.source,
+    "target_fresh": feedback.fresh,
+    "stale_grace_s": TORQUE_SIM_ASSIST_STALE_GRACE_S,
+    "active": decision.active,
+    "tracking_status": decision.tracking_status,
+    "position_tolerance_deg": STEER_ASSIST_CONFIG.position_tolerance_deg,
+    "tracking_duration_s": STEER_ASSIST_CONFIG.tracking_duration_s,
+    "min_outward_velocity_deg_s": STEER_ASSIST_CONFIG.min_outward_velocity_deg_s,
+    "candidate_duration_s": STEER_ASSIST_CONFIG.candidate_duration_s,
+    "candidate_evidence_s": decision.candidate_evidence_s,
+    "candidate_reference_angle_deg": decision.candidate_reference_angle_deg,
+    "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
+    "override_slew_rate_deg_s": STEER_ASSIST_CONFIG.override_slew_rate_deg_s,
+    "override_slewing": decision.override_slewing,
+    "release_duration_s": STEER_ASSIST_CONFIG.release_duration_s,
+    "max_release_relative_velocity_deg_s": STEER_ASSIST_CONFIG.max_release_relative_velocity_deg_s,
+    "release_pending": decision.release_since is not None,
+    "release_evidence_s": decision.release_evidence_s,
+    "target_step_deg": decision.target_step_deg,
+    "target_rate_deg_s": decision.target_rate_deg_s,
+    "target_interval_s": decision.target_interval_s,
+    "haptic_target_rate_deg_s": decision.haptic_target_rate_deg_s,
+    "wheel_velocity_deg_s": decision.wheel_velocity_deg_s,
+    "relative_velocity_deg_s": decision.relative_velocity_deg_s,
+    "velocity_m_s": velocity_m_s,
+    "speed_source": speed_source,
+    "carstate_age_s": carstate_age_s,
+    "controlsstate_age_s": feedback.controlsstate_age_s,
+    "caroutput_age_s": feedback.caroutput_age_s,
+    "selfdrive_age_s": feedback.selfdrive_age_s,
+    "model_target_angle_deg": model_target_angle_deg,
+    "clipped_model_target_angle_deg": (
+      None if model_target_angle_deg is None else _clip(model_target_angle_deg, -180.0, 180.0)
+    ),
+    "base_target_log_mono_time": feedback.model_log_mono_time,
+    "applied_angle_deg": feedback.applied_angle_deg,
+    "limited_haptic_target_angle_deg": limited_target_angle_deg,
+    "haptic_target_angle_deg": haptic_target_angle_deg,
+    "g29_steering": float(state["steering"]),
+    "wheel_angle_deg": decision.wheel_angle_deg,
+    "model_error_deg": decision.model_error_deg,
+    "residual_deg": decision.residual_angle_deg,
+    "model_haptic_delta_deg": decision.model_haptic_delta_deg,
+    "target_spread_deg": decision.target_spread_deg,
+    "requested_target_angle_deg": decision.requested_steering_angle_deg,
+    "requested_correction_angle_deg": decision.requested_correction_angle_deg,
+    "effect_target_position": command.target_position,
+    "force": command.force,
+    "friction": command.friction,
+    "operator_contact_marker": bool(state.get("buttons", {}).get("R2", False)),
+    "sequence": sequence,
+    "loop_interval_s": loop_interval_s,
+  }
+
+
 def _make_torque_controller(g29):
   from g29py.advanced import SteeringTorqueConfig, SteeringTorqueController
 
@@ -345,6 +470,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
   from g29py import G29
 
   g29 = None
+  steer_assist_trace_writer = None
   try:
     g29 = G29()
     g29.set_range(400)
@@ -355,6 +481,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
     haptic_target_limiter = HapticTargetLimiter()
     steer_assist_publisher = SteerAssistPublisher(steer_assist_sock)
     steer_assist_metrics_file = default_latest_json_path(STEER_ASSIST_METRICS_NAME)
+    steer_assist_trace_writer = _make_steer_assist_trace_writer()
     g29.listen()
 
     print(
@@ -379,6 +506,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
           f"steer_assist_max_release_relative_velocity={STEER_ASSIST_CONFIG.max_release_relative_velocity_deg_s:.0f}deg/s",
           f"steer_assist_haptic_force={STEER_ASSIST_HAPTIC_FORCE:.2f}",
           f"steer_assist_haptic_friction={STEER_ASSIST_HAPTIC_FRICTION:.2f}",
+          f"steer_assist_trace={steer_assist_trace_writer.path if steer_assist_trace_writer is not None else 'off'}",
           f"max_velocity={TORQUE_SIM_MAX_VELOCITY_M_S:.1f}m/s",
           f"force_response={TORQUE_SIM_FORCE_RESPONSE_VELOCITY_M_S:.1f}m/s",
         )
@@ -387,9 +515,12 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
     )
 
     frame = 0
+    last_loop_time = None
     rk = Ratekeeper(PUBLISH_RATE_HZ, print_delay_threshold=None)
     while True:
       now = time.monotonic()
+      loop_interval_s = None if last_loop_time is None else now - last_loop_time
+      last_loop_time = now
       state = g29.get_state()
       events = g29.get_events()
 
@@ -427,56 +558,30 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
       selfdrive_age = assist_feedback.selfdrive_age_s
       applied_angle = assist_feedback.applied_angle_deg
 
-      if frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
+      write_latest_metrics = frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0
+      if write_latest_metrics or steer_assist_trace_writer is not None:
+        diagnostics = _steer_assist_diagnostics(
+          state,
+          assist_feedback,
+          assist_decision,
+          command,
+          velocity,
+          speed_source_name,
+          carstate_age,
+          limited_target_angle_deg,
+          haptic_target_angle_deg,
+          steer_assist_publisher.sequence,
+          loop_interval_s,
+        )
+      if steer_assist_trace_writer is not None:
+        steer_assist_trace_writer.write({
+          "trace_version": 1,
+          "monotonic_time": now,
+          "steer_assist": diagnostics,
+        }, now)
+      if write_latest_metrics:
         write_metrics_payload(
-          {
-            "steer_assist": {
-              "requested_active": assist_decision.requested_active,
-              "engaged": assist_feedback.engaged,
-              "target_source": assist_feedback.source,
-              "target_fresh": assist_feedback.fresh,
-              "stale_grace_s": TORQUE_SIM_ASSIST_STALE_GRACE_S,
-              "active": assist_decision.active,
-              "tracking_status": assist_decision.tracking_status,
-              "position_tolerance_deg": STEER_ASSIST_CONFIG.position_tolerance_deg,
-              "tracking_duration_s": STEER_ASSIST_CONFIG.tracking_duration_s,
-              "min_outward_velocity_deg_s": STEER_ASSIST_CONFIG.min_outward_velocity_deg_s,
-              "candidate_duration_s": STEER_ASSIST_CONFIG.candidate_duration_s,
-              "candidate_evidence_s": assist_decision.candidate_evidence_s,
-              "candidate_reference_angle_deg": assist_decision.candidate_reference_angle_deg,
-              "haptic_max_rate_deg_s": STEER_ASSIST_HAPTIC_MAX_RATE_DEG_S,
-              "override_slew_rate_deg_s": STEER_ASSIST_CONFIG.override_slew_rate_deg_s,
-              "override_slewing": assist_decision.override_slewing,
-              "release_duration_s": STEER_ASSIST_CONFIG.release_duration_s,
-              "max_release_relative_velocity_deg_s": STEER_ASSIST_CONFIG.max_release_relative_velocity_deg_s,
-              "release_pending": assist_decision.release_since is not None,
-              "release_evidence_s": assist_decision.release_evidence_s,
-              "target_step_deg": assist_decision.target_step_deg,
-              "target_rate_deg_s": assist_decision.target_rate_deg_s,
-              "target_interval_s": assist_decision.target_interval_s,
-              "haptic_target_rate_deg_s": assist_decision.haptic_target_rate_deg_s,
-              "wheel_velocity_deg_s": assist_decision.wheel_velocity_deg_s,
-              "relative_velocity_deg_s": assist_decision.relative_velocity_deg_s,
-              "velocity_m_s": velocity,
-              "carstate_age_s": carstate_age,
-              "controlsstate_age_s": controlsstate_age,
-              "caroutput_age_s": caroutput_age,
-              "selfdrive_age_s": selfdrive_age,
-              "model_target_angle_deg": target_angle,
-              "base_target_log_mono_time": assist_feedback.model_log_mono_time,
-              "applied_angle_deg": applied_angle,
-              "haptic_target_angle_deg": haptic_target_angle_deg,
-              "wheel_angle_deg": assist_decision.wheel_angle_deg,
-              "model_error_deg": assist_decision.model_error_deg,
-              "residual_deg": assist_decision.residual_angle_deg,
-              "model_haptic_delta_deg": assist_decision.model_haptic_delta_deg,
-              "target_spread_deg": assist_decision.target_spread_deg,
-              "requested_target_angle_deg": assist_decision.requested_steering_angle_deg,
-              "requested_correction_angle_deg": assist_decision.requested_correction_angle_deg,
-              "force": command.force,
-              "friction": command.friction,
-            },
-          },
+          {"steer_assist": diagnostics},
           latest_file=steer_assist_metrics_file,
           print_line=False,
         )
@@ -532,6 +637,8 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
       frame += 1
       rk.keep_time()
   finally:
+    if steer_assist_trace_writer is not None:
+      steer_assist_trace_writer.close()
     if g29 is not None:
       g29.force_off()
       g29.stop()

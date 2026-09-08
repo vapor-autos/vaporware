@@ -1,18 +1,23 @@
 from dataclasses import FrozenInstanceError
+import json
+from types import SimpleNamespace
 
 import pytest
 
 from openpilot.cereal import messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.turbo.g29d import (
+  AssistFeedback,
   AssistTargetSource,
   HapticTargetLimiter,
   PUBLISH_RATE_HZ,
   SpeedSource,
   SteerAssistPublisher,
+  SteerAssistTraceWriter,
   _effect_position_to_steering_angle_deg,
   _make_assist_torque_controller,
   _publish_teleop_command,
+  _steer_assist_diagnostics,
   _steering_angle_to_g29_target,
 )
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistInput
@@ -74,6 +79,62 @@ def test_steer_assist_controller_contracts_are_immutable():
     input_data.fresh = False
   with pytest.raises(FrozenInstanceError):
     decision.active = True
+
+
+def test_steer_assist_trace_writer_appends_buffered_json(tmp_path):
+  trace_path = tmp_path / "steer-assist.jsonl"
+  writer = SteerAssistTraceWriter(str(trace_path), flush_interval_s=0.0)
+
+  writer.write({"trace_version": 1, "monotonic_time": 10.0}, now=10.0)
+  writer.close()
+
+  assert json.loads(trace_path.read_text()) == {"trace_version": 1, "monotonic_time": 10.0}
+  assert not writer.enabled
+
+
+def test_steer_assist_diagnostics_capture_replay_inputs():
+  feedback = AssistFeedback(
+    model_angle_deg=12.0,
+    model_log_mono_time=10_000_000_000,
+    fresh=True,
+    engaged=True,
+    source="controlsState",
+    controlsstate_age_s=0.02,
+    caroutput_age_s=0.03,
+    selfdrive_age_s=0.04,
+    applied_angle_deg=11.0,
+  )
+  decision = SteerAssistController(SteerAssistConfig(tracking_duration_s=0.0)).update(SteerAssistInput(
+    wheel_angle_deg=15.0,
+    model_target_angle_deg=12.0,
+    haptic_target_angle_deg=10.0,
+    base_target_log_mono_time=10_000_000_000,
+    fresh=True,
+    now=10.0,
+  ))
+  command = SimpleNamespace(target_position=0.47, force=0.4, friction=0.25)
+
+  diagnostics = _steer_assist_diagnostics(
+    {"steering": -15.0 / 180.0, "buttons": {"R2": True}},
+    feedback,
+    decision,
+    command,
+    velocity_m_s=2.0,
+    speed_source="carState",
+    carstate_age_s=0.01,
+    limited_target_angle_deg=10.25,
+    haptic_target_angle_deg=10.0,
+    sequence=7,
+    loop_interval_s=0.02,
+  )
+
+  assert diagnostics["model_target_angle_deg"] == pytest.approx(12.0)
+  assert diagnostics["limited_haptic_target_angle_deg"] == pytest.approx(10.25)
+  assert diagnostics["haptic_target_angle_deg"] == pytest.approx(10.0)
+  assert diagnostics["wheel_angle_deg"] == pytest.approx(15.0)
+  assert diagnostics["operator_contact_marker"]
+  assert diagnostics["sequence"] == 7
+  assert diagnostics["loop_interval_s"] == pytest.approx(0.02)
 
 
 class FakeCarState:
