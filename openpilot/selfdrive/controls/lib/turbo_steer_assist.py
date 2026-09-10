@@ -9,6 +9,7 @@ STEERING_TARGET_MAX_ANGLE_DEG = 180.0
 DEFAULT_STALE_TIMEOUT_S = 0.25
 DEFAULT_CONTEXT_TIMEOUT_S = 0.35
 DEFAULT_TARGET_MISMATCH_DEG = 15.0
+DEFAULT_RELEASE_FADE_S = 0.2
 
 
 def clip(value: float, lo: float, hi: float) -> float:
@@ -80,6 +81,66 @@ def resolve_turbo_steer_assist_state(
     source_sequence=0 if decision is None else decision.sequence,
     source_base_model_log_mono_time=0 if decision is None else decision.base_model_log_mono_time,
   )
+
+
+class TurboSteerAssistApplicator:
+  def __init__(self, release_fade_s: float = DEFAULT_RELEASE_FADE_S):
+    self.release_fade_s = max(0.0, release_fade_s)
+    self._was_applied = False
+    self._last_applied_correction_deg = 0.0
+    self._last_requested_angle_deg = 0.0
+    self._release_start_time: float | None = None
+    self._release_start_correction_deg = 0.0
+
+  def update(
+    self,
+    apply_enabled: bool,
+    decision: TurboSteerAssistDecision | None,
+    model_angle_deg: float,
+    now: float | None = None,
+  ) -> TurboSteerAssistAppliedState:
+    now = time.monotonic() if now is None else now
+    state = resolve_turbo_steer_assist_state(apply_enabled, decision, model_angle_deg)
+
+    if state.applied:
+      self._release_start_time = None
+      self._release_start_correction_deg = 0.0
+      self._was_applied = True
+      self._last_applied_correction_deg = state.final_angle_deg - state.model_angle_deg
+      self._last_requested_angle_deg = state.requested_angle_deg
+      return state
+
+    # Only a fresh, intentional release fades the previous correction. Safety
+    # fallbacks such as stale/invalid input or lateral disengagement remain immediate.
+    if apply_enabled and decision is not None and decision.status == "inactive" and self._was_applied:
+      if self._release_start_time is None or now < self._release_start_time:
+        self._release_start_time = now
+        self._release_start_correction_deg = self._last_applied_correction_deg
+
+      release_elapsed_s = max(0.0, now - self._release_start_time)
+      release_progress = 1.0 if self.release_fade_s == 0.0 else clip(release_elapsed_s / self.release_fade_s, 0.0, 1.0)
+      if release_progress < 1.0:
+        correction_deg = self._release_start_correction_deg * (1.0 - release_progress)
+        return TurboSteerAssistAppliedState(
+          applied=True,
+          status="releasing",
+          target_available=False,
+          requested_angle_deg=self._last_requested_angle_deg,
+          model_angle_deg=float(model_angle_deg),
+          final_angle_deg=clip_steering_angle_deg(float(model_angle_deg) + correction_deg),
+          source_sequence=decision.sequence,
+          source_base_model_log_mono_time=decision.base_model_log_mono_time,
+        )
+
+    self._reset()
+    return state
+
+  def _reset(self) -> None:
+    self._was_applied = False
+    self._last_applied_correction_deg = 0.0
+    self._last_requested_angle_deg = 0.0
+    self._release_start_time = None
+    self._release_start_correction_deg = 0.0
 
 
 class TurboSteerAssistSource:

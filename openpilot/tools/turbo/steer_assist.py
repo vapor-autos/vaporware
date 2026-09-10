@@ -15,7 +15,9 @@ class SteerAssistConfig:
   wheel_velocity_tau_s: float = 0.06
   override_slew_rate_deg_s: float = 180.0
   release_duration_s: float = 0.2
-  max_release_relative_velocity_deg_s: float = 10.0
+  release_position_tolerance_deg: float = 7.0
+  release_abort_tolerance_deg: float = 10.0
+  release_failure_grace_s: float = 0.06
 
   def __post_init__(self) -> None:
     nonnegative_fields = (
@@ -26,10 +28,17 @@ class SteerAssistConfig:
       "wheel_velocity_tau_s",
       "override_slew_rate_deg_s",
       "release_duration_s",
-      "max_release_relative_velocity_deg_s",
+      "release_position_tolerance_deg",
+      "release_abort_tolerance_deg",
+      "release_failure_grace_s",
     )
     for field in nonnegative_fields:
       object.__setattr__(self, field, max(0.0, getattr(self, field)))
+    object.__setattr__(
+      self,
+      "release_abort_tolerance_deg",
+      max(self.release_position_tolerance_deg, self.release_abort_tolerance_deg),
+    )
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,9 @@ class SteerAssistDecision:
   candidate_reference_angle_deg: float | None
   release_since: float | None
   release_evidence_s: float
+  release_centered: bool
+  release_outward: bool
+  release_failure_s: float
 
 
 class SteerAssistController:
@@ -94,6 +106,10 @@ class SteerAssistController:
     self._candidate_reference_angle_deg: float | None = None
     self._release_since: float | None = None
     self._release_evidence_s = 0.0
+    self._release_last_update_time: float | None = None
+    self._release_failure_since: float | None = None
+    self._release_centered = False
+    self._release_outward = False
     self._override_slew_last_update_time: float | None = None
     self._override_slew_target_angle_deg: float | None = None
     self._override_slew_complete = False
@@ -134,7 +150,6 @@ class SteerAssistController:
         input_data.wheel_angle_deg,
         input_data.haptic_target_angle_deg,
         residual_angle_deg,
-        target_spread_deg,
         input_data.now,
       )
     elif requested_active:
@@ -191,6 +206,11 @@ class SteerAssistController:
       candidate_reference_angle_deg=self._candidate_reference_angle_deg,
       release_since=self._release_since,
       release_evidence_s=self._release_evidence_s,
+      release_centered=self._release_centered,
+      release_outward=self._release_outward,
+      release_failure_s=(
+        0.0 if self._release_failure_since is None else max(0.0, input_data.now - self._release_failure_since)
+      ),
     )
 
   def _clear_candidate(self) -> None:
@@ -202,6 +222,10 @@ class SteerAssistController:
   def _clear_release_candidate(self) -> None:
     self._release_since = None
     self._release_evidence_s = 0.0
+    self._release_last_update_time = None
+    self._release_failure_since = None
+    self._release_centered = False
+    self._release_outward = False
 
   def _reset_detection(self, status: str) -> None:
     self._tracking_status = status
@@ -277,11 +301,8 @@ class SteerAssistController:
     wheel_angle_deg: float,
     haptic_target_angle_deg: float,
     error_deg: float,
-    target_spread_deg: float,
     now: float,
   ) -> None:
-    relative_velocity_deg_s = self._relative_velocity_deg_s
-
     if self._tracking_status not in ("tracking", "candidate", "override"):
       if abs(error_deg) > self.config.position_tolerance_deg:
         self._reset_detection("disarmed")
@@ -321,22 +342,49 @@ class SteerAssistController:
           self._tracking_status = "override"
 
     if self._tracking_status == "override":
-      release_ready = (
-        target_spread_deg <= self.config.position_tolerance_deg
-        and abs(relative_velocity_deg_s) <= self.config.max_release_relative_velocity_deg_s
-      )
-      if not release_ready:
+      release_complete = self._update_release_candidate(error_deg, now)
+      if release_complete:
+        self._tracking_status = "tracking"
+        self._clear_candidate()
         self._clear_release_candidate()
-      else:
-        if self._release_since is None:
-          self._release_since = now
-        self._release_evidence_s = max(0.0, now - self._release_since)
-        if self._release_evidence_s >= self.config.release_duration_s:
-          self._tracking_status = "tracking"
-          self._clear_candidate()
-          self._clear_release_candidate()
     else:
       self._clear_release_candidate()
+
+  def _update_release_candidate(self, error_deg: float, now: float) -> bool:
+    if self._release_last_update_time is not None and now < self._release_last_update_time:
+      self._clear_release_candidate()
+
+    dt = 0.0 if self._release_last_update_time is None else now - self._release_last_update_time
+    self._release_last_update_time = now
+    self._release_centered = abs(error_deg) <= self.config.release_position_tolerance_deg
+    self._release_outward = (
+      abs(error_deg) > self.config.release_position_tolerance_deg
+      and abs(self._wheel_velocity_deg_s) >= self.config.min_outward_velocity_deg_s
+      and error_deg * self._wheel_velocity_deg_s > 0.0
+    )
+    release_aborted = abs(error_deg) >= self.config.release_abort_tolerance_deg or self._release_outward
+    if release_aborted:
+      self._clear_release_candidate()
+      return False
+
+    if self._release_centered:
+      if self._release_since is None:
+        self._release_since = now
+      elif self._release_failure_since is not None:
+        if now - self._release_failure_since > self.config.release_failure_grace_s:
+          self._release_since = now
+          self._release_evidence_s = 0.0
+        self._release_failure_since = None
+      else:
+        self._release_evidence_s += max(0.0, dt)
+      return self._release_evidence_s >= self.config.release_duration_s
+
+    if self._release_since is not None:
+      if self._release_failure_since is None:
+        self._release_failure_since = now
+      elif now - self._release_failure_since > self.config.release_failure_grace_s:
+        self._clear_release_candidate()
+    return False
 
   def _slew_override_target(self, desired_target_angle_deg: float, model_target_angle_deg: float, now: float) -> float:
     desired_target_angle_deg = clip(desired_target_angle_deg, -180.0, 180.0)

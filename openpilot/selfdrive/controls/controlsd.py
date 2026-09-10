@@ -22,11 +22,12 @@ from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurv
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
+  DEFAULT_RELEASE_FADE_S,
   DEFAULT_STALE_TIMEOUT_S,
+  TurboSteerAssistApplicator,
   TurboSteerAssistAppliedState,
   TurboSteerAssistDecision,
   TurboSteerAssistSource,
-  resolve_turbo_steer_assist_state,
 )
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
@@ -78,6 +79,12 @@ class Controls:
       TurboSteerAssistSource(
         self.sm,
         stale_timeout_s=float(os.getenv("TURBO_STEER_ASSIST_STALE_TIMEOUT_S", str(DEFAULT_STALE_TIMEOUT_S))),
+      )
+      if turbo_steer_assist_supported else None
+    )
+    self.turbo_steer_assist_applicator = (
+      TurboSteerAssistApplicator(
+        release_fade_s=float(os.getenv("TURBO_STEER_ASSIST_RELEASE_FADE_S", str(DEFAULT_RELEASE_FADE_S))),
       )
       if turbo_steer_assist_supported else None
     )
@@ -178,12 +185,17 @@ class Controls:
         self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
         if self.turbo_steer_assist_source is not None else None
       )
-      assist_state = resolve_turbo_steer_assist_state(self.turbo_steer_assist_apply, assist_decision, model_angle_deg)
+      assert self.turbo_steer_assist_applicator is not None
+      assist_state = self.turbo_steer_assist_applicator.update(
+        self.turbo_steer_assist_apply,
+        assist_decision,
+        model_angle_deg,
+      )
       final_angle_deg = assist_state.final_angle_deg
       actuators.steeringAngleDeg = final_angle_deg
       if assist_decision is not None:
         self.turbo_steer_assist_state = assist_state
-        self.log_turbo_steer_assist(model_angle_deg, final_angle_deg, assist_decision)
+        self.log_turbo_steer_assist(model_angle_deg, final_angle_deg, assist_decision, assist_state)
 
     # Ensure no NaNs/Infs
     for p in ACTUATOR_FIELDS:
@@ -202,6 +214,7 @@ class Controls:
     model_angle_deg: float,
     final_angle_deg: float,
     decision: TurboSteerAssistDecision,
+    applied_state: TurboSteerAssistAppliedState,
   ) -> None:
     now = time.monotonic()
     if now - self.turbo_steer_assist_last_log < TURBO_STEER_ASSIST_LOG_INTERVAL_S:
@@ -216,7 +229,7 @@ class Controls:
     cloudlog.info(
       "turbo steer assist apply=%s status=%s age=%s context_age=%s base_model_delta=%s sequence=%d model_angle=%.2fdeg assist_target=%s final_angle=%.2fdeg",
       self.turbo_steer_assist_apply,
-      decision.status,
+      applied_state.status,
       age_text,
       context_age_text,
       base_model_delta_text,

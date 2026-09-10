@@ -714,12 +714,12 @@ def test_steer_assist_publisher_latches_and_releases_override():
   assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(2.0)
 
   publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.16)
-  assert publisher.last_decision.release_since == pytest.approx(10.16)
-  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.35)
+  assert publisher.last_decision.release_since == pytest.approx(10.15)
+  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.34)
   assert publisher.last_decision.tracking_status == "override"
   assert publisher.last_decision.release_evidence_s == pytest.approx(0.19)
 
-  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.37)
+  publisher.update({"steering": -2.0 / 180.0}, 0.0, 0.0, 0.0, now=10.36)
   msg = messaging.log_from_bytes(sock.sent[-1])
   assert publisher.last_decision.tracking_status == "tracking"
   assert not msg.turboSteerAssist.active
@@ -765,10 +765,11 @@ def test_steer_assist_publisher_does_not_release_when_target_crosses_wheel():
     assert msg.turboSteerAssist.active
     assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(20.0)
 
-  assert publisher.last_decision.release_since is None
+  assert publisher.last_decision.release_since == pytest.approx(10.22)
+  assert publisher.last_decision.release_evidence_s == pytest.approx(0.1)
 
 
-def test_steer_assist_publisher_requires_pairwise_convergence_to_release():
+def test_steer_assist_publisher_releases_without_raw_model_convergence():
   sock = FakeSocket()
   publisher = make_steer_assist_publisher(sock)
 
@@ -776,16 +777,56 @@ def test_steer_assist_publisher_requires_pairwise_convergence_to_release():
   publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
   assert publisher.last_decision.tracking_status == "override"
 
-  publisher.update({"steering": 5.0 / 180.0}, -5.0 / 180.0, 5.0, 0.0, now=10.10)
-  publisher.update({"steering": 5.0 / 180.0}, -5.0 / 180.0, 5.0, 0.0, now=10.40)
+  publisher.update({"steering": -5.0 / 180.0}, -5.0 / 180.0, 20.0, 5.0, now=10.10)
+  publisher.update({"steering": -5.0 / 180.0}, -5.0 / 180.0, 20.0, 5.0, now=10.40)
   msg = messaging.log_from_bytes(sock.sent[-1])
 
-  assert publisher.last_decision.wheel_angle_deg == pytest.approx(-5.0)
-  assert publisher.last_decision.target_spread_deg == pytest.approx(10.0)
-  assert publisher.last_decision.tracking_status == "override"
+  assert publisher.last_decision.wheel_angle_deg == pytest.approx(5.0)
+  assert publisher.last_decision.target_spread_deg == pytest.approx(15.0)
+  assert publisher.last_decision.tracking_status == "tracking"
   assert publisher.last_decision.release_since is None
-  assert msg.turboSteerAssist.active
-  assert msg.turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(-5.0)
+  assert not msg.turboSteerAssist.active
+
+
+def test_steer_assist_publisher_preserves_release_evidence_across_short_gap():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  assert publisher.last_decision.tracking_status == "override"
+
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.10)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.20)
+  assert publisher.last_decision.release_evidence_s == pytest.approx(0.1)
+
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, -2.0, now=10.22)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, -2.0, now=10.26)
+  assert publisher.last_decision.release_failure_s == pytest.approx(0.04)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.28)
+  assert publisher.last_decision.release_evidence_s == pytest.approx(0.1)
+
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.39)
+  assert publisher.last_decision.tracking_status == "tracking"
+  assert not messaging.log_from_bytes(sock.sent[-1]).turboSteerAssist.active
+
+
+def test_steer_assist_publisher_resets_release_evidence_after_long_gap():
+  sock = FakeSocket()
+  publisher = make_steer_assist_publisher(sock)
+
+  publisher.update({"steering": 0.0}, 0.0, 0.0, 0.0, now=10.0)
+  publisher.update({"steering": -10.0 / 180.0}, 0.0, 0.0, 0.0, now=10.02)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.10)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.20)
+  assert publisher.last_decision.release_evidence_s == pytest.approx(0.1)
+
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, -2.0, now=10.22)
+  publisher.update({"steering": -6.0 / 180.0}, 0.0, 0.0, 0.0, now=10.30)
+
+  assert publisher.last_decision.tracking_status == "override"
+  assert publisher.last_decision.release_since == pytest.approx(10.30)
+  assert publisher.last_decision.release_evidence_s == pytest.approx(0.0)
 
 
 def test_steer_assist_publisher_slews_only_override_acquisition():

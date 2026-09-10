@@ -3,11 +3,31 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
+  TurboSteerAssistApplicator,
+  TurboSteerAssistDecision,
   TurboSteerAssistSource,
   g29_steering_to_angle_deg,
   resolve_turbo_steer_assist_state,
   steering_angle_to_g29_target,
 )
+
+
+def make_decision(
+  status: str,
+  target_angle_deg: float | None,
+  requested_angle_deg: float | None = 20.0,
+  sequence: int = 1,
+) -> TurboSteerAssistDecision:
+  return TurboSteerAssistDecision(
+    target_angle_deg=target_angle_deg,
+    requested_angle_deg=requested_angle_deg,
+    status=status,
+    receive_age_s=0.01,
+    context_age_s=0.01,
+    base_model_delta_deg=0.0,
+    sequence=sequence,
+    base_model_log_mono_time=10_000_000_000,
+  )
 
 
 class FakeTurboSteerAssist:
@@ -143,6 +163,53 @@ def test_turbo_steer_assist_state_preserves_rejection_status():
   assert state.requested_angle_deg == pytest.approx(7.0)
   assert state.source_sequence == 1
   assert state.final_angle_deg == pytest.approx(5.0)
+
+
+def test_turbo_steer_assist_applicator_fades_fresh_release_correction():
+  applicator = TurboSteerAssistApplicator(release_fade_s=0.2)
+
+  applied = applicator.update(True, make_decision("active", 20.0), model_angle_deg=0.0, now=10.0)
+  release_start = applicator.update(True, make_decision("inactive", None, sequence=2), model_angle_deg=4.0, now=10.05)
+  release_midpoint = applicator.update(True, make_decision("inactive", None, sequence=3), model_angle_deg=6.0, now=10.15)
+  released = applicator.update(True, make_decision("inactive", None, sequence=4), model_angle_deg=8.0, now=10.26)
+
+  assert applied.applied
+  assert applied.final_angle_deg == pytest.approx(20.0)
+  assert release_start.applied
+  assert release_start.status == "releasing"
+  assert not release_start.target_available
+  assert release_start.requested_angle_deg == pytest.approx(20.0)
+  assert release_start.final_angle_deg == pytest.approx(24.0)
+  assert release_midpoint.applied
+  assert release_midpoint.status == "releasing"
+  assert release_midpoint.final_angle_deg == pytest.approx(16.0)
+  assert not released.applied
+  assert released.status == "inactive"
+  assert released.final_angle_deg == pytest.approx(8.0)
+
+
+@pytest.mark.parametrize("fallback_status", ("stale", "invalid", "lat_inactive"))
+def test_turbo_steer_assist_applicator_keeps_safety_fallbacks_immediate(fallback_status):
+  applicator = TurboSteerAssistApplicator(release_fade_s=0.2)
+  assert applicator.update(True, make_decision("active", 20.0), model_angle_deg=0.0, now=10.0).applied
+
+  fallback = applicator.update(True, make_decision(fallback_status, None, sequence=2), model_angle_deg=5.0, now=10.05)
+
+  assert not fallback.applied
+  assert fallback.status == fallback_status
+  assert fallback.final_angle_deg == pytest.approx(5.0)
+
+
+def test_turbo_steer_assist_applicator_regrab_cancels_release_fade():
+  applicator = TurboSteerAssistApplicator(release_fade_s=0.2)
+  assert applicator.update(True, make_decision("active", 20.0), model_angle_deg=0.0, now=10.0).applied
+  assert applicator.update(True, make_decision("inactive", None, sequence=2), model_angle_deg=2.0, now=10.05).status == "releasing"
+
+  reapplied = applicator.update(True, make_decision("active", -5.0, sequence=3), model_angle_deg=2.0, now=10.10)
+
+  assert reapplied.applied
+  assert reapplied.status == "applied"
+  assert reapplied.final_angle_deg == pytest.approx(-5.0)
 
 
 def test_turbo_steer_assist_source_clips_target_to_steering_range():
