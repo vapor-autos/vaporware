@@ -4,8 +4,7 @@
 
 Make the GCS clearly show when the UGV is actually applying the remote steering
 override. The existing green border continues to mean that self-driving is
-engaged. While the UGV is applying the override, the GCS border becomes amber
-and a `MANUAL OVERRIDE` badge is shown.
+engaged. While the UGV is applying the override, the GCS border becomes amber.
 
 The display must be driven by the UGV's final control decision, not by the G29
 request on the GCS. This prevents the UI from claiming an override when the
@@ -54,7 +53,7 @@ decision and the angle ultimately written to `CarControl`.
   device UI remains unchanged.
 - Require the feedback service to be seen, alive, valid, and `applied=true`.
 - Also require the GCS UI to be on-road and self-driving to be enabled.
-- Use amber/orange for the border and show a centered `MANUAL OVERRIDE` badge.
+- Use amber/orange for the border without an additional text badge.
 - Retain the existing colors otherwise: green for engaged, blue for disengaged,
   and gray for openpilot's existing pre-enabled/driver-override status.
 - On stale or missing feedback, fail visually back to the ordinary engagement
@@ -74,7 +73,7 @@ decision and the angle ultimately written to `CarControl`.
 ## Outdoor-test acceptance criteria
 
 - Green border when engaged with no applied manual steering override.
-- Amber border and `MANUAL OVERRIDE` while the UGV applies the override.
+- Amber border while the UGV applies the override.
 - Return to green within the feedback liveness window after release, rejection,
   disconnect, or stale input.
 - Route logs show the applied flag, status, source lineage, and final angle for

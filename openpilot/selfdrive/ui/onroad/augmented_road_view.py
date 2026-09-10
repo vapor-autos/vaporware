@@ -10,8 +10,7 @@ from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
-from openpilot.system.ui.lib.application import FontWeight, gui_app
-from openpilot.system.ui.widgets.label import gui_label
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, get_warp_matrix
 from openpilot.common.transformations.orientation import rot_from_euler
@@ -28,11 +27,6 @@ BORDER_COLORS = {
   UIStatus.ENGAGED: rl.Color(0x16, 0x7F, 0x40, 0xFF),  # Green for engaged state
 }
 TURBO_STEER_OVERRIDE_COLOR = rl.Color(0xDA, 0x6F, 0x25, 0xFF)
-TURBO_STEER_OVERRIDE_LABEL = "MANUAL OVERRIDE"
-TURBO_STEER_OVERRIDE_BADGE_WIDTH = 500
-TURBO_STEER_OVERRIDE_BADGE_HEIGHT = 68
-TURBO_STEER_OVERRIDE_BADGE_MARGIN = 18
-TURBO_STEER_OVERRIDE_FONT_SIZE = 38
 
 WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
@@ -145,23 +139,6 @@ class AugmentedRoadView(CameraView):
     border_rect = rl.Rectangle(rect.x + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
                                rect.width - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE)
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)
-    if turbo_steer_override_active:
-      badge_width = min(TURBO_STEER_OVERRIDE_BADGE_WIDTH, border_rect.width - 2 * TURBO_STEER_OVERRIDE_BADGE_MARGIN)
-      badge_rect = rl.Rectangle(
-        border_rect.x + (border_rect.width - badge_width) / 2,
-        border_rect.y + TURBO_STEER_OVERRIDE_BADGE_MARGIN,
-        badge_width,
-        TURBO_STEER_OVERRIDE_BADGE_HEIGHT,
-      )
-      rl.draw_rectangle_rounded(badge_rect, 0.35, 10, TURBO_STEER_OVERRIDE_COLOR)
-      gui_label(
-        badge_rect,
-        TURBO_STEER_OVERRIDE_LABEL,
-        font_size=TURBO_STEER_OVERRIDE_FONT_SIZE,
-        color=rl.WHITE,
-        font_weight=FontWeight.BOLD,
-        alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER,
-      )
 
   def _switch_stream_if_needed(self, sm):
     if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
