@@ -2609,7 +2609,7 @@ struct Event {
     teleopCarControl @109 :Car.CarControl;
     turboSteerAssist @110 :Custom.TurboSteerAssist;
     turboTeleopCommand @111 :Custom.TurboTeleopCommand;
-    customReserved5 @112 :Custom.CustomReserved5;
+    turboSteerAssistState @112 :Custom.TurboSteerAssistState;
     customReserved6 @113 :Custom.CustomReserved6;
     customReserved7 @114 :Custom.CustomReserved7;
     customReserved8 @115 :Custom.CustomReserved8;

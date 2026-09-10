@@ -39,7 +39,15 @@ struct TurboTeleopCommand @0x80ae746ee2596b11 {
   }
 }
 
-struct CustomReserved5 @0xa5cd762cd951a455 {
+struct TurboSteerAssistState @0xa5cd762cd951a455 {
+  applied @0 :Bool;
+  status @1 :Text;
+  targetAvailable @2 :Bool;
+  requestedSteeringAngleDeg @3 :Float32;
+  modelSteeringAngleDeg @4 :Float32;
+  finalSteeringAngleDeg @5 :Float32;
+  sourceSequence @6 :UInt32;
+  sourceBaseModelLogMonoTime @7 :UInt64;
 }
 
 struct CustomReserved6 @0xf98d843bfd7004a3 {

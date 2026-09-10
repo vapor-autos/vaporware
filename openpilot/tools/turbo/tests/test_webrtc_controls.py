@@ -4,6 +4,7 @@ import random
 import pytest
 
 from openpilot.cereal import log, messaging
+from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.turbo.webrtc_controls import (
   CONTROL_PACKET_MAGIC,
   CerealDataChannelReceiver,
@@ -29,6 +30,12 @@ class FakePubMaster:
 
   def send(self, service, msg):
     self.sent.append((service, msg))
+
+
+def test_steer_assist_state_service_is_logged_at_feedback_rate():
+  service = SERVICE_LIST["turboSteerAssistState"]
+  assert service.should_log
+  assert service.frequency == 20
 
 
 def test_create_feedback_data_channel_is_unordered_and_does_not_retransmit(mocker):
@@ -132,6 +139,7 @@ def test_expand_feedback_services_accepts_steer_assist_profile():
     "selfdriveState",
     "controlsState",
     "carOutput",
+    "turboSteerAssistState",
   ]
 
 
@@ -233,6 +241,37 @@ def test_cereal_data_channel_receiver_accepts_packed_udp_control():
   assert len(pm.sent) == 1
   assert pm.sent[0][1].turboSteerAssist.active
   assert pm.sent[0][1].turboSteerAssist.requestedSteeringAngleDeg == pytest.approx(92.5)
+
+
+def test_cereal_data_channel_receiver_republishes_steer_assist_state():
+  pm = FakePubMaster()
+  receiver = CerealDataChannelReceiver(["turboSteerAssistState"], pm=pm)
+  msg = messaging.new_message("turboSteerAssistState", valid=True, logMonoTime=123)
+  msg.turboSteerAssistState.applied = True
+  msg.turboSteerAssistState.status = "applied"
+  msg.turboSteerAssistState.targetAvailable = True
+  msg.turboSteerAssistState.requestedSteeringAngleDeg = 12.5
+  msg.turboSteerAssistState.modelSteeringAngleDeg = 10.0
+  msg.turboSteerAssistState.finalSteeringAngleDeg = 12.5
+  msg.turboSteerAssistState.sourceSequence = 7
+  msg.turboSteerAssistState.sourceBaseModelLogMonoTime = 10_000_000_000
+
+  for packet in encode_feedback_packets(msg.to_bytes_packed(), message_id=123):
+    assert receiver.receive(packet)
+
+  assert len(pm.sent) == 1
+  service, forwarded = pm.sent[0]
+  assert service == "turboSteerAssistState"
+  assert forwarded.valid
+  assert forwarded.logMonoTime == 123
+  assert forwarded.turboSteerAssistState.applied
+  assert forwarded.turboSteerAssistState.status == "applied"
+  assert forwarded.turboSteerAssistState.targetAvailable
+  assert forwarded.turboSteerAssistState.requestedSteeringAngleDeg == pytest.approx(12.5)
+  assert forwarded.turboSteerAssistState.modelSteeringAngleDeg == pytest.approx(10.0)
+  assert forwarded.turboSteerAssistState.finalSteeringAngleDeg == pytest.approx(12.5)
+  assert forwarded.turboSteerAssistState.sourceSequence == 7
+  assert forwarded.turboSteerAssistState.sourceBaseModelLogMonoTime == 10_000_000_000
 
 
 def test_cereal_data_channel_receiver_rejects_out_of_order_packed_message():

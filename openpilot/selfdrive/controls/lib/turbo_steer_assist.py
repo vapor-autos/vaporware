@@ -30,12 +30,56 @@ def clip_steering_angle_deg(steering_angle_deg: float) -> float:
 @dataclass(frozen=True)
 class TurboSteerAssistDecision:
   target_angle_deg: float | None
+  requested_angle_deg: float | None
   status: str
   receive_age_s: float | None
   context_age_s: float | None
   base_model_delta_deg: float | None
   sequence: int
   base_model_log_mono_time: int
+
+
+@dataclass(frozen=True)
+class TurboSteerAssistAppliedState:
+  applied: bool
+  status: str
+  target_available: bool
+  requested_angle_deg: float
+  model_angle_deg: float
+  final_angle_deg: float
+  source_sequence: int
+  source_base_model_log_mono_time: int
+
+
+def resolve_turbo_steer_assist_state(
+  apply_enabled: bool,
+  decision: TurboSteerAssistDecision | None,
+  model_angle_deg: float,
+) -> TurboSteerAssistAppliedState:
+  target_available = decision is not None and decision.target_angle_deg is not None
+  applied = bool(apply_enabled and target_available)
+  requested_angle_deg = 0.0
+  if decision is not None and decision.requested_angle_deg is not None and math.isfinite(decision.requested_angle_deg):
+    requested_angle_deg = float(decision.requested_angle_deg)
+  final_angle_deg = float(decision.target_angle_deg) if applied else float(model_angle_deg)
+
+  if decision is None:
+    status = "unsupported"
+  elif decision.status == "active":
+    status = "applied" if applied else "apply_disabled"
+  else:
+    status = decision.status
+
+  return TurboSteerAssistAppliedState(
+    applied=applied,
+    status=status,
+    target_available=target_available,
+    requested_angle_deg=requested_angle_deg,
+    model_angle_deg=float(model_angle_deg),
+    final_angle_deg=final_angle_deg,
+    source_sequence=0 if decision is None else decision.sequence,
+    source_base_model_log_mono_time=0 if decision is None else decision.base_model_log_mono_time,
+  )
 
 
 class TurboSteerAssistSource:
@@ -61,6 +105,7 @@ class TurboSteerAssistSource:
     receive_age_s = self._age(now)
     context_age_s: float | None = None
     base_model_delta_deg: float | None = None
+    requested_angle_deg: float | None = None
     sequence = 0
     base_model_log_mono_time = 0
 
@@ -68,6 +113,7 @@ class TurboSteerAssistSource:
       self._override_session_active = status == "active"
       return TurboSteerAssistDecision(
         target_angle_deg=target_angle_deg,
+        requested_angle_deg=requested_angle_deg,
         status=status,
         receive_age_s=receive_age_s,
         context_age_s=context_age_s,
@@ -82,15 +128,15 @@ class TurboSteerAssistSource:
       return finish("unseen")
     if not self.sm.valid["turboSteerAssist"]:
       return finish("invalid")
+    assist = self.sm["turboSteerAssist"]
+    requested_angle_deg = float(assist.requestedSteeringAngleDeg)
+    sequence = int(assist.sequence)
+    base_model_log_mono_time = int(assist.baseModelLogMonoTime)
     if receive_age_s is None or receive_age_s > self.stale_timeout_s:
       return finish("stale")
-
-    assist = self.sm["turboSteerAssist"]
     if not assist.active:
       return finish("inactive")
 
-    sequence = int(assist.sequence)
-    base_model_log_mono_time = int(assist.baseModelLogMonoTime)
     key = (base_model_log_mono_time, sequence)
     if key != self._current_key:
       self._current_key = key
@@ -121,11 +167,10 @@ class TurboSteerAssistSource:
     if not self._override_session_active and abs(base_model_delta_deg) > self.target_mismatch_deg:
       return finish("target_mismatch")
 
-    requested_target_angle_deg = float(assist.requestedSteeringAngleDeg)
-    if not math.isfinite(requested_target_angle_deg):
+    if not math.isfinite(requested_angle_deg):
       return finish("invalid_target")
 
-    return finish("active", clip_steering_angle_deg(requested_target_angle_deg))
+    return finish("active", clip_steering_angle_deg(requested_angle_deg))
 
   def _age(self, now: float) -> float | None:
     if not self.sm.seen["turboSteerAssist"]:

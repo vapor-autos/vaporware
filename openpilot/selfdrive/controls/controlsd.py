@@ -21,7 +21,13 @@ from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, S
 from openpilot.selfdrive.controls.lib.latcontrol_curvature import LatControlCurvature
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
-from openpilot.selfdrive.controls.lib.turbo_steer_assist import DEFAULT_STALE_TIMEOUT_S, TurboSteerAssistDecision, TurboSteerAssistSource
+from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
+  DEFAULT_STALE_TIMEOUT_S,
+  TurboSteerAssistAppliedState,
+  TurboSteerAssistDecision,
+  TurboSteerAssistSource,
+  resolve_turbo_steer_assist_state,
+)
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -32,6 +38,7 @@ LaneChangeDirection = log.LaneChangeDirection
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 TURBO_MAX_CURVATURE = 0.45
 TURBO_STEER_ASSIST_LOG_INTERVAL_S = 1.0
+TURBO_STEER_ASSIST_STATE_PUBLISH_INTERVAL = 5
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -57,7 +64,10 @@ class Controls:
     if turbo_steer_assist_supported:
       services.append('turboSteerAssist')
     self.sm = messaging.SubMaster(services, poll='selfdriveState')
-    self.pm = messaging.PubMaster(['carControl', 'controlsState'])
+    publish_services = ['carControl', 'controlsState']
+    if turbo_steer_assist_supported:
+      publish_services.append('turboSteerAssistState')
+    self.pm = messaging.PubMaster(publish_services)
 
     self.steer_limited_by_safety = False
     self.curvature = 0.0
@@ -72,6 +82,7 @@ class Controls:
       if turbo_steer_assist_supported else None
     )
     self.turbo_steer_assist_last_log = 0.0
+    self.turbo_steer_assist_state: TurboSteerAssistAppliedState | None = None
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
@@ -167,13 +178,11 @@ class Controls:
         self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
         if self.turbo_steer_assist_source is not None else None
       )
-      final_angle_deg = (
-        assist_decision.target_angle_deg
-        if self.turbo_steer_assist_apply and assist_decision is not None and assist_decision.target_angle_deg is not None
-        else model_angle_deg
-      )
+      assist_state = resolve_turbo_steer_assist_state(self.turbo_steer_assist_apply, assist_decision, model_angle_deg)
+      final_angle_deg = assist_state.final_angle_deg
       actuators.steeringAngleDeg = final_angle_deg
       if assist_decision is not None:
+        self.turbo_steer_assist_state = assist_state
         self.log_turbo_steer_assist(model_angle_deg, final_angle_deg, assist_decision)
 
     # Ensure no NaNs/Infs
@@ -288,6 +297,20 @@ class Controls:
       cs.lateralControlState.torqueState = lac_log
 
     self.pm.send('controlsState', dat)
+
+    if self.turbo_steer_assist_state is not None and self.sm.frame % TURBO_STEER_ASSIST_STATE_PUBLISH_INTERVAL == 0:
+      dat = messaging.new_message('turboSteerAssistState')
+      dat.valid = CS.canValid
+      state = dat.turboSteerAssistState
+      state.applied = self.turbo_steer_assist_state.applied
+      state.status = self.turbo_steer_assist_state.status
+      state.targetAvailable = self.turbo_steer_assist_state.target_available
+      state.requestedSteeringAngleDeg = self.turbo_steer_assist_state.requested_angle_deg
+      state.modelSteeringAngleDeg = self.turbo_steer_assist_state.model_angle_deg
+      state.finalSteeringAngleDeg = self.turbo_steer_assist_state.final_angle_deg
+      state.sourceSequence = self.turbo_steer_assist_state.source_sequence
+      state.sourceBaseModelLogMonoTime = self.turbo_steer_assist_state.source_base_model_log_mono_time
+      self.pm.send('turboSteerAssistState', dat)
 
     # carControl
     cc_send = messaging.new_message('carControl')

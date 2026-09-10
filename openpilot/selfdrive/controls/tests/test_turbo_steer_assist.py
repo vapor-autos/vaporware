@@ -5,6 +5,7 @@ import pytest
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import (
   TurboSteerAssistSource,
   g29_steering_to_angle_deg,
+  resolve_turbo_steer_assist_state,
   steering_angle_to_g29_target,
 )
 
@@ -71,6 +72,7 @@ def test_turbo_steer_assist_source_uses_fresh_active_target():
   decision = source.update(lat_active=True, model_angle_deg=5.0, now=10.1)
 
   assert decision.target_angle_deg == pytest.approx(7.0)
+  assert decision.requested_angle_deg == pytest.approx(7.0)
   assert decision.status == "active"
   assert decision.receive_age_s == pytest.approx(0.1)
   assert decision.context_age_s == pytest.approx(0.1)
@@ -91,6 +93,56 @@ def test_turbo_steer_assist_source_accepts_zero_degree_target():
   decision = source.update(lat_active=True, model_angle_deg=5.0, now=10.1)
   assert decision.target_angle_deg == pytest.approx(0.0)
   assert decision.status == "active"
+
+
+def test_turbo_steer_assist_state_reports_applied_target():
+  decision = TurboSteerAssistSource(FakeSubMaster(requested_angle_deg=7.0)).update(
+    lat_active=True,
+    model_angle_deg=5.0,
+    now=10.1,
+  )
+
+  state = resolve_turbo_steer_assist_state(True, decision, model_angle_deg=5.0)
+
+  assert state.applied
+  assert state.status == "applied"
+  assert state.target_available
+  assert state.requested_angle_deg == pytest.approx(7.0)
+  assert state.model_angle_deg == pytest.approx(5.0)
+  assert state.final_angle_deg == pytest.approx(7.0)
+  assert state.source_sequence == 1
+  assert state.source_base_model_log_mono_time == 10_000_000_000
+
+
+def test_turbo_steer_assist_state_reports_apply_disabled():
+  decision = TurboSteerAssistSource(FakeSubMaster(requested_angle_deg=7.0)).update(
+    lat_active=True,
+    model_angle_deg=5.0,
+    now=10.1,
+  )
+
+  state = resolve_turbo_steer_assist_state(False, decision, model_angle_deg=5.0)
+
+  assert not state.applied
+  assert state.status == "apply_disabled"
+  assert state.target_available
+  assert state.final_angle_deg == pytest.approx(5.0)
+
+
+def test_turbo_steer_assist_state_preserves_rejection_status():
+  decision = TurboSteerAssistSource(
+    FakeSubMaster(recv_time=10.0, requested_angle_deg=7.0),
+    stale_timeout_s=0.25,
+  ).update(lat_active=True, model_angle_deg=5.0, now=10.5)
+
+  state = resolve_turbo_steer_assist_state(True, decision, model_angle_deg=5.0)
+
+  assert not state.applied
+  assert state.status == "stale"
+  assert not state.target_available
+  assert state.requested_angle_deg == pytest.approx(7.0)
+  assert state.source_sequence == 1
+  assert state.final_angle_deg == pytest.approx(5.0)
 
 
 def test_turbo_steer_assist_source_clips_target_to_steering_range():

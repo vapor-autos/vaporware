@@ -118,6 +118,7 @@ STEER_ASSIST_FEEDBACK_SERVICES = [
   "selfdriveState",
   "controlsState",
   "carOutput",
+  "turboSteerAssistState",
 ]
 
 FEEDBACK_SERVICE_PROFILES = {
