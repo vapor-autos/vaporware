@@ -64,6 +64,7 @@ class UIState:
     self._turbo_steer_override_ui_enabled = os.getenv(TURBO_GCS_STEER_OVERRIDE_UI_ENV) == "1"
     if self._turbo_steer_override_ui_enabled:
       services.append(TURBO_STEER_ASSIST_STATE_SERVICE)
+      services.extend(["turboIntentState", "turboIntentRequest"])
     self.sm = messaging.SubMaster(services)
 
     self.prime_state = PrimeState()

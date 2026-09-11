@@ -26,6 +26,8 @@ from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_drivi
 from openpilot.common.file_chunker import read_file_chunked, get_manifest_path
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
 from openpilot.selfdrive.modeld.helpers import usbgpu_present, modeld_pkl_path, get_tg_input_devices
+from openpilot.selfdrive.modeld.turbo_intent import TurboIntentRuntime, INTENT_SUBSCRIPTIONS
+from openpilot.selfdrive.controls.lib.turbo_intent import STATE_SERVICE
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -115,7 +117,6 @@ class ModelState:
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs['desire_pulse'][0] = 0
     self.npy['desire'][:] = np.where(inputs['desire_pulse'] - self.prev_desire > .99, inputs['desire_pulse'], 0)
-    self.prev_desire[:] = inputs['desire_pulse']
     self.npy['traffic_convention'][:] = inputs['traffic_convention']
     self.npy['action_t'][:] = inputs['action_t']
     self.npy['tfm'][:,:] = transforms['img'][:,:]
@@ -126,6 +127,8 @@ class ModelState:
     if prepare_only:
       return None
 
+    # A skipped evaluation must not consume the rising edge of a desire.
+    self.prev_desire[:] = inputs['desire_pulse']
     outs, = self.run_policy(
       **{k: self.input_queues[k] for k in POLICY_INPUTS if k in self.input_queues}, img=img, big_img=big_img
     )
@@ -178,10 +181,6 @@ def main(demo=False):
   model = ModelState(vipc_client_main.width, vipc_client_main.height, USBGPU)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
-  # messaging
-  pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry"])
-  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
-
   publish_state = PublishState()
   params = Params()
 
@@ -203,6 +202,15 @@ def main(demo=False):
   else:
     CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   cloudlog.info("modeld got CarParams: %s", CP.brand)
+
+  publications = ["modelV2", "drivingModelData", "cameraOdometry"]
+  subscriptions = ["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"]
+  if CP.brand == "turbo":
+    publications.append(STATE_SERVICE)
+    subscriptions.extend(INTENT_SUBSCRIPTIONS)
+  pm = PubMaster(publications)
+  sm = SubMaster(subscriptions)
+  turbo_intent = TurboIntentRuntime(pm) if CP.brand == "turbo" else None
 
   # TODO this needs more thought, use .2s extra for now to estimate other delays
   # TODO Move smooth seconds to action function
@@ -245,7 +253,8 @@ def main(demo=False):
       meta_extra = meta_main
 
     sm.update(0)
-    desire = DH.desire
+    desire = (turbo_intent.before_inference(sm, time.monotonic(), params.get_bool("LateralManeuverMode"))
+              if turbo_intent is not None else DH.desire)
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
@@ -312,9 +321,14 @@ def main(demo=False):
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
-      modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
-      modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
+      if turbo_intent is not None:
+        turbo_intent.after_inference(desire, lane_change_prob, meta_main.frame_id, time.monotonic())
+        modelv2_send.modelV2.meta.laneChangeState = turbo_intent.manager.lane_change_state
+        modelv2_send.modelV2.meta.laneChangeDirection = turbo_intent.manager.lane_change_direction
+      else:
+        DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob)
+        modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
+        modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
 
       fill_driving_model_data(drivingdata_send, modelv2_send)
       fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, meta_main.timestamp_eof, live_calib_seen)

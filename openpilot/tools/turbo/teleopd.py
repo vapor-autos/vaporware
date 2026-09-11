@@ -33,14 +33,14 @@ def steer_cmd(steering: float) -> int:
 
 def button_event_can_msgs(packer: CANPacker, g29) -> list[tuple[int, bytes, int]]:
   # Legacy SCTP fallback carries these edge pulses in g29. The UDP projection clears them.
+  if g29.l2:
+    return [packer.make_can_msg("CRUISE_ENABLE", MAIN_BUS, {"ENABLE": 0})]
   if g29.dpadUp:
     return [packer.make_can_msg("TOGGLE_HEADLIGHTS", MAIN_BUS, {"HEADLIGHTS_TOGGLE": 1})]
   if g29.dpadDown:
     return [packer.make_can_msg("TOGGLE_HEADLIGHTS", MAIN_BUS, {"HEADLIGHTS_TOGGLE": 0})]
   if g29.l3:
     return [packer.make_can_msg("CRUISE_ENABLE", MAIN_BUS, {"ENABLE": 1})]
-  if g29.l2:
-    return [packer.make_can_msg("CRUISE_ENABLE", MAIN_BUS, {"ENABLE": 0})]
   return []
 
 

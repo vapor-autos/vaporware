@@ -7,7 +7,7 @@ import requests
 
 from openpilot.system.webrtc.helpers import StreamRequestBody
 from openpilot.system.webrtc.webrtcd import StreamSession
-from openpilot.tools.turbo.webrtc_controls import CerealDatagramProtocol, CerealDataChannelReceiver
+from openpilot.tools.turbo.webrtc_controls import CerealDatagramProtocol, CerealDataChannelReceiver, UDP_CONTROL_SERVICES
 
 
 CONTROL_UDP_PORT = 8445
@@ -75,6 +75,7 @@ class ControlDatagramProtocol(CerealDatagramProtocol):
     super().__init__(lambda: self.cereal_receiver)
 
   def configure(self, services: list[str]) -> None:
+    services = [service for service in services if service in UDP_CONTROL_SERVICES]
     self.cereal_receiver = CerealDataChannelReceiver(services) if services else None
 
 

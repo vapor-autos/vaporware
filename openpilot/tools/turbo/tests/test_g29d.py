@@ -57,6 +57,12 @@ def test_publish_teleop_command_ignores_non_command_events():
   assert sock.sent == []
 
 
+def test_publish_teleop_cancel_wins_all_simultaneous_buttons():
+  sock = FakeSocket()
+  events = [{"type": "button_down", "control": b} for b in ("up", "down", "L3", "left_paddle", "L2")]
+  assert _publish_teleop_command(sock, events) == "cruiseCancel"
+
+
 def test_steer_assist_controller_contracts_are_immutable():
   config = SteerAssistConfig(tracking_duration_s=0.0)
   input_data = SteerAssistInput(

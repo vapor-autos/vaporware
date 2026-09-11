@@ -9,6 +9,7 @@ from typing import Any
 import capnp
 
 from openpilot.cereal import log, messaging
+from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE
 
 
 FEEDBACK_DATA_CHANNEL_LABEL = "feedback"
@@ -102,6 +103,7 @@ UI_MODEL_FEEDBACK_SERVICES = UI_SMOKE_FEEDBACK_SERVICES + [
   "carParams",
   "liveParameters",
   "onroadEvents",
+  STATE_SERVICE,
 ]
 
 UI_FULL_FEEDBACK_SERVICES = UI_MODEL_FEEDBACK_SERVICES + [
@@ -119,6 +121,7 @@ STEER_ASSIST_FEEDBACK_SERVICES = [
   "controlsState",
   "carOutput",
   "turboSteerAssistState",
+  STATE_SERVICE,
 ]
 
 FEEDBACK_SERVICE_PROFILES = {
@@ -137,6 +140,8 @@ def parse_control_services(services_arg: str) -> list[str]:
   services = parse_services(services_arg)
   if "g29" in services and "turboSteerAssist" not in services:
     services.append("turboSteerAssist")
+  if "g29" in services and REQUEST_SERVICE not in services:
+    services.append(REQUEST_SERVICE)
   return services
 
 

@@ -2610,9 +2610,9 @@ struct Event {
     turboSteerAssist @110 :Custom.TurboSteerAssist;
     turboTeleopCommand @111 :Custom.TurboTeleopCommand;
     turboSteerAssistState @112 :Custom.TurboSteerAssistState;
-    customReserved6 @113 :Custom.CustomReserved6;
-    customReserved7 @114 :Custom.CustomReserved7;
-    customReserved8 @115 :Custom.CustomReserved8;
+    turboIntentRequest @113 :Custom.TurboIntentRequest;
+    turboIntentState @114 :Custom.TurboIntentState;
+    turboIntentLinkState @115 :Custom.TurboIntentLinkState;
     customReserved9 @116 :Custom.CustomReserved9;
     customReserved10 @136 :Custom.CustomReserved10;
     customReserved11 @137 :Custom.CustomReserved11;

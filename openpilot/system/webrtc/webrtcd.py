@@ -38,6 +38,7 @@ from openpilot.tools.turbo.webrtc_controls import (
 )
 from openpilot.common.params import Params
 from openpilot.cereal import messaging, log
+from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE, LINK_SERVICE, PROTOCOL_VERSION
 
 
 # socket trick: route lookup for 8.8.8.8 (nothing is sent or actually connected to)
@@ -90,6 +91,7 @@ class AsyncTaskRunner:
 
 
 FEEDBACK_SERVICE_RATES_HZ = {
+  STATE_SERVICE: 10.0,
   "carState": 20.0,
   "selfdriveState": 20.0,
   "carOutput": 20.0,
@@ -111,6 +113,7 @@ FEEDBACK_SERVICE_PRIORITIES = {
   "carOutput": 2,
   "controlsState": 3,
   "onroadEvents": 4,
+  STATE_SERVICE: 5,
 }
 
 
@@ -327,12 +330,20 @@ class CerealOutgoingMessageProxy(AsyncTaskRunner):
 
 
 class CerealIncomingMessageProxy:
-  def __init__(self, pm: messaging.PubMaster):
+  def __init__(self, pm: messaging.PubMaster, session_id: str = ""):
     self.pm = pm
+    self.session_id = session_id
 
   def send(self, message: bytes):
     msg_json = json.loads(message)
     msg_type, msg_data = msg_json["type"], msg_json["data"]
+    if msg_type == LINK_SERVICE:
+      return  # Bridge-owned local heartbeat, never trusted from a remote peer.
+    if msg_type == REQUEST_SERVICE:
+      if (not self.session_id or not msg_json.get("valid") or not isinstance(msg_data, dict) or
+          msg_data.get("sessionId") != self.session_id or msg_data.get("protocolVersion") != PROTOCOL_VERSION or
+          msg_data.get("action") not in ("request", "cancel")):
+        return
     size = None
     if not isinstance(msg_data, dict):
       size = len(msg_data)
@@ -562,7 +573,7 @@ class StreamSession:
     self.bitrate_controller: LivestreamBitrateController | None = None
     self.stats_logger: WebRTCStatsLogger | None = None
     if len(body.bridge_services_in) > 0:
-      self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master)
+      self.incoming_bridge = CerealIncomingMessageProxy(self.shared_pub_master, self.identifier)
     if len(body.bridge_services_out) > 0:
       webrtc_stats_enabled = os.getenv("WEBRTCD_STATS", "").strip().lower() in ("1", "true", "yes", "on")
       self.outgoing_bridge = CerealOutgoingMessageProxy(
@@ -591,6 +602,7 @@ class StreamSession:
       )
 
     self.run_task: asyncio.Task | None = None
+    self.intent_link_task: asyncio.Task | None = None
     self._cleanup_lock = asyncio.Lock()
     self._cleanup_done = False
     self.logger = logging.getLogger("webrtcd")
@@ -660,6 +672,9 @@ class StreamSession:
         self.stream.set_message_handler(self.message_handler)
         if self.incoming_bridge is not None:
           await self.shared_pub_master.add_services_if_needed(self.incoming_bridge_services)
+          if REQUEST_SERVICE in self.incoming_bridge_services:
+            await self.shared_pub_master.add_services_if_needed([LINK_SERVICE])
+            self.intent_link_task = asyncio.create_task(self._intent_link_heartbeat())
         if self.outgoing_bridge is not None:
           if self.feedback_udp_endpoint is not None:
             self.feedback_udp_channel = UdpFeedbackChannel(self.feedback_udp_endpoint)
@@ -688,11 +703,28 @@ class StreamSession:
     finally:
       await self.post_run_cleanup()
 
+  def _publish_intent_link(self, connected: bool):
+    msg = messaging.new_message(LINK_SERVICE, valid=True)
+    msg.turboIntentLinkState.sessionId = self.identifier
+    msg.turboIntentLinkState.connected = connected
+    self.shared_pub_master.send(LINK_SERVICE, msg)
+
+  async def _intent_link_heartbeat(self):
+    while True:
+      self._publish_intent_link(True)
+      await asyncio.sleep(0.1)
+
   async def post_run_cleanup(self):
     async with self._cleanup_lock:
       if self._cleanup_done:
         return
       self._cleanup_done = True
+      if self.intent_link_task is not None:
+        self.intent_link_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+          await self.intent_link_task
+        self.intent_link_task = None
+        self._publish_intent_link(False)
       self.params.put("LivestreamRequestKeyframe", False)
       if self.stats_logger is not None:
         await self.stats_logger.stop()

@@ -69,8 +69,8 @@ def test_cereal_data_channel_sender_reads_aiortc_buffered_amount():
 
 
 def test_parse_control_services_adds_derived_steer_assist_for_g29():
-  assert parse_control_services("g29") == ["g29", "turboSteerAssist"]
-  assert parse_control_services("g29,turboSteerAssist") == ["g29", "turboSteerAssist"]
+  assert parse_control_services("g29") == ["g29", "turboSteerAssist", "turboIntentRequest"]
+  assert parse_control_services("g29,turboSteerAssist") == ["g29", "turboSteerAssist", "turboIntentRequest"]
   assert parse_control_services("testJoystick") == ["testJoystick"]
 
 
@@ -79,7 +79,7 @@ def test_split_control_services_routes_latest_state_to_udp_and_commands_to_sctp(
 
   assert split_control_services(services, udp_enabled=True) == (
     ["g29", "turboSteerAssist"],
-    ["turboTeleopCommand"],
+    ["turboIntentRequest", "turboTeleopCommand"],
   )
 
 
@@ -88,7 +88,7 @@ def test_split_control_services_falls_back_to_sctp_without_udp_endpoint():
 
   assert split_control_services(services, udp_enabled=False) == (
     [],
-    ["g29", "testJoystick", "turboSteerAssist"],
+    ["g29", "testJoystick", "turboSteerAssist", "turboIntentRequest"],
   )
 
 
@@ -140,6 +140,7 @@ def test_expand_feedback_services_accepts_steer_assist_profile():
     "controlsState",
     "carOutput",
     "turboSteerAssistState",
+    "turboIntentState",
   ]
 
 
@@ -171,6 +172,7 @@ def test_expand_feedback_services_ui_model_keeps_lte_default_small():
     "carParams",
     "liveParameters",
     "onroadEvents",
+    "turboIntentState",
   ]
 
 

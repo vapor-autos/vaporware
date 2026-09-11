@@ -1,6 +1,6 @@
 import asyncio
 
-from openpilot.tools.turbo.webrtc_uplink import fetch_offer
+from openpilot.tools.turbo.webrtc_uplink import fetch_offer, ControlDatagramProtocol
 
 
 def test_fetch_offer_extracts_udp_feedback_endpoint(mocker):
@@ -27,3 +27,12 @@ def test_fetch_offer_extracts_udp_feedback_endpoint(mocker):
   assert offer.control_udp_services == ["g29", "turboSteerAssist"]
   assert offer.body.cameras == ["wideRoad", "driver"]
   get.assert_called_once_with("http://gcs:8443/offer", params={"control_udp_port": 8445}, timeout=1.0)
+
+
+def test_udp_receiver_refuses_intent_and_bridge_heartbeat(mocker):
+  receiver = mocker.patch("openpilot.tools.turbo.webrtc_uplink.CerealDataChannelReceiver")
+  protocol = ControlDatagramProtocol()
+  protocol.configure(["g29", "turboSteerAssist", "turboIntentRequest", "turboIntentLinkState"])
+  receiver.assert_called_once_with(["g29", "turboSteerAssist"])
+  protocol.configure(["turboIntentRequest"])
+  assert protocol.cereal_receiver is None

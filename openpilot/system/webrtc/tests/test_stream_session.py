@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import pytest
 # for aiortc and its dependencies
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -11,7 +12,9 @@ from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
 from openpilot.cereal import messaging, log
 
-from openpilot.system.webrtc.webrtcd import CerealOutgoingMessageProxy, CerealIncomingMessageProxy, FEEDBACK_SERVICE_RATES_HZ, UdpFeedbackChannel
+from openpilot.system.webrtc.webrtcd import (
+  CerealOutgoingMessageProxy, CerealIncomingMessageProxy, FEEDBACK_SERVICE_RATES_HZ, UdpFeedbackChannel, StreamSession,
+)
 from openpilot.tools.turbo.webrtc_controls import FeedbackPacketReassembler
 from openpilot.system.webrtc.device.video import LiveStreamVideoStreamTrack
 
@@ -320,6 +323,52 @@ class TestStreamSession:
     assert forwarded.logMonoTime == 123
     assert forwarded.turboSteerAssist.active
     assert forwarded.turboSteerAssist.requestedSteeringAngleDeg == 12.5
+
+  @pytest.mark.parametrize("session,valid,protocol,action,accepted", [
+    ("session", True, 1, "request", True), ("session", True, 1, "cancel", True),
+    ("old-session", True, 1, "request", False), ("session", False, 1, "request", False),
+    ("session", True, 2, "request", False), ("session", True, 1, "none", False),
+  ])
+  def test_intent_is_bound_to_real_bridge_session(self, mocker, session, valid, protocol, action, accepted):
+    pm = mocker.Mock()
+    proxy = CerealIncomingMessageProxy(pm, session_id="session")
+    proxy.send(json.dumps({"type": "turboIntentRequest", "valid": valid, "logMonoTime": 123,
+                           "data": {"sessionId": session, "protocolVersion": protocol, "action": action}}).encode())
+    assert bool(pm.send.call_count) == accepted
+
+  def test_remote_cannot_forge_local_link_heartbeat(self, mocker):
+    pm = mocker.Mock()
+    CerealIncomingMessageProxy(pm, session_id="session").send(json.dumps({
+      "type": "turboIntentLinkState", "valid": True, "data": {"sessionId": "session", "connected": True},
+    }).encode())
+    pm.send.assert_not_called()
+
+  def test_intent_heartbeat_stops_and_publishes_disconnect_on_cleanup(self, mocker):
+    session = StreamSession.__new__(StreamSession)
+    session.identifier = "bridge-session"
+    session.shared_pub_master = mocker.Mock()
+    session.params = mocker.Mock()
+    session.stats_logger = session.outgoing_bridge = session.feedback_udp_channel = None
+    session.video_tracks = {}
+    session.bitrate_controller = mocker.Mock(stop=mocker.AsyncMock())
+    session.stream = mocker.Mock(stop=mocker.AsyncMock())
+    session._cleanup_lock = asyncio.Lock()
+    session._cleanup_done = False
+
+    async def exercise():
+      session.intent_link_task = asyncio.create_task(session._intent_link_heartbeat())
+      await asyncio.sleep(0)  # One event-loop turn, no real wait or socket.
+      assert session.shared_pub_master.send.call_args.args[1].turboIntentLinkState.connected
+      await session.post_run_cleanup()
+      calls = session.shared_pub_master.send.call_args_list
+      assert len(calls) == 2
+      assert calls[-1].args[1].turboIntentLinkState.sessionId == "bridge-session"
+      assert not calls[-1].args[1].turboIntentLinkState.connected
+      assert session.intent_link_task is None
+      await session.post_run_cleanup()
+      assert session.shared_pub_master.send.call_count == 2
+
+    self.loop.run_until_complete(exercise())
 
   def test_livestream_track(self, mocker):
     fake_msg = messaging.new_message("livestreamDriverEncodeData")

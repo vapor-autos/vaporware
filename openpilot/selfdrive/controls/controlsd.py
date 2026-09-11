@@ -149,7 +149,10 @@ class Controls:
     actuators.longControlState = self.LoC.long_control_state
 
     # Enable blinkers while lane changing
-    if model_v2.meta.laneChangeState != LaneChangeState.off:
+    # Turbo's legacy carcontroller interprets these as headlights, not indicators.
+    # Intent is displayed through model/intent metadata; explicit headlight commands
+    # remain owned by teleopd. Do not send lane-change blinkers to the Turbo ECU.
+    if self.CP.brand != "turbo" and model_v2.meta.laneChangeState != LaneChangeState.off:
       CC.leftBlinker = model_v2.meta.laneChangeDirection == LaneChangeDirection.left
       CC.rightBlinker = model_v2.meta.laneChangeDirection == LaneChangeDirection.right
 
@@ -185,15 +188,13 @@ class Controls:
         self.turbo_steer_assist_source.update(CC.latActive, model_angle_deg)
         if self.turbo_steer_assist_source is not None else None
       )
-      assert self.turbo_steer_assist_applicator is not None
-      assist_state = self.turbo_steer_assist_applicator.update(
-        self.turbo_steer_assist_apply,
-        assist_decision,
-        model_angle_deg,
-      )
-      final_angle_deg = assist_state.final_angle_deg
-      actuators.steeringAngleDeg = final_angle_deg
-      if assist_decision is not None:
+      actuators.steeringAngleDeg = model_angle_deg
+      if self.turbo_steer_assist_applicator is not None and assist_decision is not None:
+        assist_state = self.turbo_steer_assist_applicator.update(
+          self.turbo_steer_assist_apply, assist_decision, model_angle_deg,
+        )
+        final_angle_deg = assist_state.final_angle_deg
+        actuators.steeringAngleDeg = final_angle_deg
         self.turbo_steer_assist_state = assist_state
         self.log_turbo_steer_assist(model_angle_deg, final_angle_deg, assist_decision, assist_state)
 

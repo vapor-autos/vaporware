@@ -10,6 +10,8 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import g29_steering_to_angle_deg, steering_angle_to_g29_target
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistDecision, SteerAssistInput
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool, write_metrics_payload
+from openpilot.tools.turbo.intent import PaddleIntentController
+from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE, FEEDBACK_TIMEOUT_S
 
 RETRY_DELAY = 2.0
 PUBLISH_RATE_HZ = 50
@@ -30,10 +32,10 @@ STEER_ASSIST_TRACE_ENV = "TURBO_STEER_ASSIST_TRACE"
 STEER_ASSIST_TRACE_FILE_ENV = "TURBO_STEER_ASSIST_TRACE_FILE"
 STEER_ASSIST_TRACE_FLUSH_INTERVAL_S = 1.0
 TELEOP_COMMAND_BY_CONTROL = {
+  "L2": "cruiseCancel",
   "up": "headlightsOn",
   "down": "headlightsOff",
   "L3": "cruiseEnable",
-  "L2": "cruiseCancel",
 }
 
 
@@ -172,7 +174,7 @@ class AssistTargetSource:
     stale_timeout_s: float = TORQUE_SIM_ASSIST_STALE_S,
     stale_grace_s: float = TORQUE_SIM_ASSIST_STALE_GRACE_S,
   ):
-    self.sm = messaging.SubMaster(["controlsState", "selfdriveState", "carOutput"]) if sm is None else sm
+    self.sm = messaging.SubMaster(["controlsState", "selfdriveState", "carOutput", STATE_SERVICE, "turboSteerAssistState"]) if sm is None else sm
     self.stale_timeout_s = stale_timeout_s
     self.stale_grace_s = max(0.0, stale_grace_s)
     self._cached_target_angle_deg: float | None = None
@@ -471,13 +473,13 @@ def _make_assist_torque_controller(g29):
   return SteeringTorqueController(g29, config=config)
 
 
-def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
-  from g29py import G29
+def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
+  from openpilot.tools.turbo.g29_compat import TurboG29
 
   g29 = None
   steer_assist_trace_writer = None
   try:
-    g29 = G29()
+    g29 = TurboG29()
     g29.set_range(400)
     torque_controller = _make_torque_controller(g29)
     assist_torque_controller = _make_assist_torque_controller(g29)
@@ -485,6 +487,7 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
     assist_target_source = AssistTargetSource()
     haptic_target_limiter = HapticTargetLimiter()
     steer_assist_publisher = SteerAssistPublisher(steer_assist_sock)
+    intent_controller = PaddleIntentController()
     steer_assist_metrics_file = default_latest_json_path(STEER_ASSIST_METRICS_NAME)
     steer_assist_trace_writer = _make_steer_assist_trace_writer()
     g29.listen()
@@ -559,6 +562,24 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
         now=now,
       )
 
+      feedback_sm = assist_target_source.sm
+      intent_fresh = (feedback_sm.seen[STATE_SERVICE] and feedback_sm.valid[STATE_SERVICE] and
+                      0 <= now - feedback_sm.recv_time[STATE_SERVICE] <= FEEDBACK_TIMEOUT_S)
+      intent_feedback = feedback_sm[STATE_SERVICE].to_dict() if intent_fresh else {}
+      applied_service = "turboSteerAssistState"
+      applied_fresh = (feedback_sm.seen[applied_service] and feedback_sm.valid[applied_service] and
+                       0 <= now - feedback_sm.recv_time[applied_service] <= FEEDBACK_TIMEOUT_S)
+      operator_ready = (assist_feedback.fresh and assist_feedback.engaged and assist_decision.tracking_status == "tracking" and
+                        applied_fresh and not feedback_sm[applied_service].applied)
+      intent_request = intent_controller.update(
+        state["buttons"], events, intent_feedback, feedback_sm.logMonoTime[STATE_SERVICE], intent_fresh,
+        operator_ready, _accelerator_pedal(float(state["clutch"])) > 0.05, now,
+      )
+      if frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
+        intent_msg = messaging.new_message(REQUEST_SERVICE, valid=True)
+        intent_msg.turboIntentRequest = intent_request
+        intent_sock.send(intent_msg.to_bytes())
+
       carstate_age = speed_source.last_carstate_age_s
       controlsstate_age = assist_feedback.controlsstate_age_s
       caroutput_age = assist_feedback.caroutput_age_s
@@ -585,10 +606,13 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock) -> None:
           "trace_version": 1,
           "monotonic_time": now,
           "steer_assist": diagnostics,
+          "intent": {"request": intent_request, "feedback": intent_feedback,
+                     "left_paddle": bool(state["buttons"].get("left_paddle")),
+                     "right_paddle": bool(state["buttons"].get("right_paddle"))},
         }, now)
       if write_latest_metrics:
         write_metrics_payload(
-          {"steer_assist": diagnostics},
+          {"steer_assist": diagnostics, "intent": {"request": intent_request, "feedback": intent_feedback}},
           latest_file=steer_assist_metrics_file,
           print_line=False,
         )
@@ -658,10 +682,11 @@ def main() -> None:
   g29_sock = messaging.pub_sock("g29")
   steer_assist_sock = messaging.pub_sock("turboSteerAssist")
   teleop_command_sock = messaging.pub_sock("turboTeleopCommand")
+  intent_sock = messaging.pub_sock(REQUEST_SERVICE)
 
   while True:
     try:
-      _run(g29_sock, steer_assist_sock, teleop_command_sock)
+      _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock)
     except KeyboardInterrupt:
       raise
     except Exception as e:

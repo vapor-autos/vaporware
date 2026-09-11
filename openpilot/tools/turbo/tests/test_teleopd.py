@@ -29,3 +29,9 @@ def test_legacy_g29_button_fallback_remains_supported():
   g29 = SimpleNamespace(dpadUp=False, dpadDown=False, l2=False, l3=True)
 
   assert button_event_can_msgs(packer, g29) == [(0x205, b"\x01", MAIN_BUS)]
+
+
+def test_legacy_cancel_wins_simultaneous_buttons():
+  packer = CANPacker("turbo_rc_car")
+  g29 = SimpleNamespace(dpadUp=True, dpadDown=True, l2=True, l3=True)
+  assert button_event_can_msgs(packer, g29) == [(0x205, b"\x00", MAIN_BUS)]

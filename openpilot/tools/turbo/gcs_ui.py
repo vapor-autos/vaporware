@@ -7,6 +7,7 @@ from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import GuiApplication
 from openpilot.system.ui.widgets import Widget
+from openpilot.selfdrive.ui.turbo_intent import draw_intent_status
 
 
 OVERLAY_BASE_W = 482
@@ -49,7 +50,7 @@ def _gcs_window_size() -> tuple[int, int]:
 class GcsUi(Widget):
   def __init__(self) -> None:
     super().__init__()
-    self._sm = messaging.SubMaster(["g29"])
+    self._sm = messaging.SubMaster(["g29", "turboIntentState", "turboIntentRequest"])
     self._wide = self._child(CameraView("camerad", VisionStreamType.VISION_STREAM_WIDE_ROAD))
     self._driver = self._child(CameraView("camerad", VisionStreamType.VISION_STREAM_DRIVER))
     self._overlay_scale = 1.0
@@ -72,6 +73,7 @@ class GcsUi(Widget):
 
     overlay = self._overlay_rect(rect)
     self._driver.render(overlay)
+    draw_intent_status(self._sm, rect)
 
   def _overlay_rect(self, rect: rl.Rectangle) -> rl.Rectangle:
     self._overlay_scale = _clip(self._overlay_scale, *_overlay_scale_bounds(rect))
