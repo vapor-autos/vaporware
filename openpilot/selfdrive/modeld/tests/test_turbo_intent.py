@@ -132,10 +132,19 @@ def test_ui_stale_feedback_and_local_unknown():
   sm[STATE_SERVICE].mode = "shadow"
   assert intent_label(sm, 10.6) == "PADDLES: SHADOW"
   sm[REQUEST_SERVICE].localStatus = "unknown"
-  assert intent_label(sm, 10.6) == "LANE CHANGE: UNKNOWN"
+  assert intent_label(sm, 10.6) == "LANE CHANGE: STATUS UNKNOWN"
   assert intent_label(sm, 11.0) == "LANE CHANGE: LINK STALE"
   sm.seen[STATE_SERVICE] = False
   assert intent_label(sm, 11.0) == ""
+
+
+def test_standstill_is_an_explicit_rejection_not_vehicle_fault():
+  runtime, sm, pm = ready_runtime()
+  send_request(runtime, sm)
+  sm["carState"].standstill = True
+  sm["carState"].vEgo = 0.0
+  assert runtime.before_inference(sm, 10.61) == log.Desire.none
+  assert pm.sent[-1][1].turboIntentState.reason == "standstill"
 
 
 def test_model_run_skips_do_not_consume_desire_edge(mocker):

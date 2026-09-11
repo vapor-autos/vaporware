@@ -151,6 +151,16 @@ def test_session_and_engagement_reset_reject_old_packets():
   assert m.status == "idle"
 
 
+def test_terminal_result_does_not_leak_into_new_session():
+  m = manager()
+  m.update(replace(HEALTH, standstill=True), request(m), 10.01)
+  assert m.reason == "standstill" and m.status == "rejected"
+  m.update(replace(HEALTH, session_id="new-session"), None, 10.1)
+  state = m.snapshot(10.1)
+  assert state["status"] == "idle" and state["requestId"] == 0
+  assert state["reason"] == "motion_not_stable"
+
+
 def test_inflight_model_intent_is_not_claimed_aborted_on_link_loss_or_override():
   m = manager()
   r = request(m)

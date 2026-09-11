@@ -31,7 +31,7 @@ class TurboIntentRuntime:
       session_id=str(link.sessionId) if sm.seen[LINK_SERVICE] else "",
       link_fresh=fresh(LINK_SERVICE, FEEDBACK_TIMEOUT_S) and bool(link.connected),
       lateral_active=sm.seen["carControl"] and cc.latActive,
-      vehicle_healthy=(fresh("carControl") and fresh("carState") and cs.canValid and not cs.standstill and
+      vehicle_healthy=(fresh("carControl") and fresh("carState") and cs.canValid and
                        not cs.steerFaultTemporary and not cs.steerFaultPermanent and
                        not cs.leftBlindspot and not cs.rightBlindspot and
                        fresh("selfdriveState") and str(sm["selfdriveState"].state) == "enabled" and
@@ -41,6 +41,7 @@ class TurboIntentRuntime:
       operator_override=bool(assist.active or sm["turboSteerAssistState"].applied),
       reverse=float(sm["g29"].reverse) > -0.9,
       speed=float(cs.vEgo),
+      standstill=bool(cs.standstill),
     )
     request = sm[REQUEST_SERVICE].to_dict() if sm.updated[REQUEST_SERVICE] and sm.valid[REQUEST_SERVICE] else None
     self.manager.update(health, request, now)

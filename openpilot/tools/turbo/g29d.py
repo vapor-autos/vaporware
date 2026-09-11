@@ -10,8 +10,8 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import g29_steering_to_angle_deg, steering_angle_to_g29_target
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistDecision, SteerAssistInput
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool, write_metrics_payload
-from openpilot.tools.turbo.intent import PaddleIntentController
-from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE, FEEDBACK_TIMEOUT_S
+from openpilot.tools.turbo.intent import PaddleIntentController, read_intent_feedback
+from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE
 
 RETRY_DELAY = 2.0
 PUBLISH_RATE_HZ = 50
@@ -534,8 +534,8 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
       state = g29.get_state()
       events = g29.get_events()
 
-      velocity, speed_source_name = speed_source.update(state, now=now)
-      assist_feedback = assist_target_source.update(now=now)
+      velocity, speed_source_name = speed_source.update(state)
+      assist_feedback = assist_target_source.update()
       target_angle = assist_feedback.model_angle_deg
       target_steering = None if target_angle is None else _steering_angle_to_g29_target(target_angle)
       wheel_angle_deg = g29_steering_to_angle_deg(float(state["steering"]))
@@ -562,18 +562,13 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
         now=now,
       )
 
-      feedback_sm = assist_target_source.sm
-      intent_fresh = (feedback_sm.seen[STATE_SERVICE] and feedback_sm.valid[STATE_SERVICE] and
-                      0 <= now - feedback_sm.recv_time[STATE_SERVICE] <= FEEDBACK_TIMEOUT_S)
-      intent_feedback = feedback_sm[STATE_SERVICE].to_dict() if intent_fresh else {}
-      applied_service = "turboSteerAssistState"
-      applied_fresh = (feedback_sm.seen[applied_service] and feedback_sm.valid[applied_service] and
-                       0 <= now - feedback_sm.recv_time[applied_service] <= FEEDBACK_TIMEOUT_S)
+      intent_context = read_intent_feedback(assist_target_source.sm)
+      intent_feedback = intent_context.data
       operator_ready = (assist_feedback.fresh and assist_feedback.engaged and assist_decision.tracking_status == "tracking" and
-                        applied_fresh and not feedback_sm[applied_service].applied)
+                        intent_context.applied_fresh and not intent_context.applied)
       intent_request = intent_controller.update(
-        state["buttons"], events, intent_feedback, feedback_sm.logMonoTime[STATE_SERVICE], intent_fresh,
-        operator_ready, _accelerator_pedal(float(state["clutch"])) > 0.05, now,
+        state["buttons"], events, intent_feedback, intent_context.log_mono_time, intent_context.fresh,
+        operator_ready, _accelerator_pedal(float(state["clutch"])) > 0.05, intent_context.now,
       )
       if frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
         intent_msg = messaging.new_message(REQUEST_SERVICE, valid=True)
@@ -601,18 +596,23 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
           steer_assist_publisher.sequence,
           loop_interval_s,
         )
+      intent_diagnostics = {
+        "request": intent_request, "feedback": intent_feedback,
+        "left_paddle": bool(state["buttons"].get("left_paddle")), "right_paddle": bool(state["buttons"].get("right_paddle")),
+        "feedback_age_s": intent_context.age_s, "applied_feedback_age_s": intent_context.applied_age_s,
+        "feedback_fresh": intent_context.fresh, "applied_feedback_fresh": intent_context.applied_fresh,
+        "operator_ready": operator_ready, "published": write_latest_metrics,
+      }
       if steer_assist_trace_writer is not None:
         steer_assist_trace_writer.write({
           "trace_version": 1,
           "monotonic_time": now,
           "steer_assist": diagnostics,
-          "intent": {"request": intent_request, "feedback": intent_feedback,
-                     "left_paddle": bool(state["buttons"].get("left_paddle")),
-                     "right_paddle": bool(state["buttons"].get("right_paddle"))},
+          "intent": intent_diagnostics,
         }, now)
       if write_latest_metrics:
         write_metrics_payload(
-          {"steer_assist": diagnostics, "intent": {"request": intent_request, "feedback": intent_feedback}},
+          {"steer_assist": diagnostics, "intent": intent_diagnostics},
           latest_file=steer_assist_metrics_file,
           print_line=False,
         )

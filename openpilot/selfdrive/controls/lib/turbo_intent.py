@@ -41,6 +41,7 @@ class IntentHealth:
   operator_override: bool = False
   reverse: bool = False
   speed: float = 0.0
+  standstill: bool = False
 
 
 class TurboIntentManager:
@@ -91,6 +92,8 @@ class TurboIntentManager:
       return "not_engaged"
     if not h.vehicle_healthy:
       return "vehicle_unhealthy"
+    if h.standstill:
+      return "standstill"
     if not h.operator_fresh:
       return "operator_stale"
     if h.reverse:
@@ -114,10 +117,15 @@ class TurboIntentManager:
       self.motion_since = None
       if self.status == "awaitingEvaluation" or (self.busy and not health.lateral_active):
         self.status, self.reason = "interrupted", "engagement_or_session_reset"
+      elif not self.busy:
+        # An old terminal result is not the status of a new engagement/session.
+        self.request = {}
+        self.status, self.reason = "idle", ""
+        self.pulse_time, self.pulse_frame, self.probability, self.responded = 0.0, 0, 0.0, False
     self.session_id = health.session_id
     self.lateral_active = health.lateral_active
 
-    moving = (health.vehicle_healthy and health.lateral_active and not health.reverse and
+    moving = (health.vehicle_healthy and health.lateral_active and not health.reverse and not health.standstill and
               math.isfinite(health.speed) and self.config.min_speed <= health.speed <= self.config.max_speed)
     if not moving:
       self.motion_since = None
@@ -131,7 +139,7 @@ class TurboIntentManager:
     elif self.status == "executing":
       # A lost link/override does not undo a model pulse. Keep the maneuver visible.
       self.reason = ("operator_link_lost" if not health.link_fresh else "vehicle_unhealthy" if not health.vehicle_healthy else
-                     "operator_overriding" if health.operator_override else "")
+                     "operator_overriding" if health.operator_override else "standstill" if health.standstill else "")
       if now - self.pulse_time > self.config.execution_timeout_s:
         self.status, self.reason = "timedOut", "takeover_required"
 

@@ -450,3 +450,15 @@ Final local result: **492 tests passed** across `openpilot/tools/turbo/tests`, t
 Deployment requires both GCS and UGV on the same schema/code revision, with native targets rebuilt through the normal build/launch workflow. Older peers do not advertise the required feedback/session and cannot issue an executable request. No UGV update or reboot has been performed; wait for the user to boot it.
 
 First test remains shadow-only: verify real paddle direction/combined L2 packets while stationary, confirm explicit rejection at standstill, then verify acknowledged `would_execute` on a clear course with validated speed. Confirm existing L2 and link-loss behavior and exercise the haptic handback before setting `TURBO_INTENT_MODE=execute`. Keep the normal GCS launch in charge of its output and use producer metrics/offline logs for inspection.
+
+## 15. First-test timing/UI correction
+
+The 22:39–22:41 UTC stationary test recorded ten right-paddle presses, four local request identities, one transmitted cancel and one transmitted request. Requests 2 and 3 disappeared before their 10 Hz publication slots. UGV logs confirmed request 4 was rejected while `standstill=true`, with no model pulse. Left-paddle hardware operation was not exercised by that trace.
+
+Cause: `g29d` sampled its loop clock before polling feedback. The new intent freshness checks rejected negative receive ages, so freshly received packets appeared stale by roughly 0.1–0.3 ms. The controller then erased its session context/pending request, or canceled on falsely stale applied-override feedback. The recorded trace contained 691 one-frame feedback dropouts after initial acquisition. This was a GCS clock-ordering defect, not evidence of LTE dropping the paddle commands.
+
+The correction samples intent freshness after the existing feedback poll, while retaining strict checks on genuinely future/stale input. Genuine feedback gaps no longer masquerade as new sessions or erase unknown outcomes. Requests keep their identity for display correlation after acknowledgment; cancellation is shown as `CANCELING` until acknowledged. Producer traces now record intent/applied receive ages, freshness, readiness and publication ticks.
+
+The intent badge uses a fixed footprint and readable statuses, with acknowledged terminal notices returning to idle after two seconds. Active execution, unknown outcomes, and stale links remain explicit. Old operators' results do not carry into a new GCS display; UGV terminal results reset on a real session/engagement change. Standstill still blocks entry but now reports `STOPPED`, not a generic vehicle fault. No speed/expiry/override gates are relaxed, and execution remains shadow by default.
+
+Verification: **563 tests passed**, including both directions at every combination of 50 Hz press phase and 10 Hz feedback phase, new-packet clock ordering, genuine link loss, unknown-result retention, session reset, and fixed UI geometry/status tests. Ruff and `git diff --check` passed. These tests do not establish a successful physical lane change.
