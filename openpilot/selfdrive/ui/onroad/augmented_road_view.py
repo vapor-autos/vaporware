@@ -5,6 +5,7 @@ from openpilot.cereal import log
 from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
+from openpilot.selfdrive.ui.turbo_intent import draw_intent_status
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
@@ -26,6 +27,7 @@ BORDER_COLORS = {
   UIStatus.OVERRIDE: rl.Color(0x89, 0x92, 0x8D, 0xFF),  # Gray for override state
   UIStatus.ENGAGED: rl.Color(0x16, 0x7F, 0x40, 0xFF),  # Green for engaged state
 }
+TURBO_STEER_OVERRIDE_COLOR = rl.Color(0xDA, 0x6F, 0x25, 0xFF)
 
 WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
@@ -48,10 +50,12 @@ class AugmentedRoadView(CameraView):
     stream_type: VisionStreamType = VisionStreamType.VISION_STREAM_ROAD,
     auto_switch_stream: bool = True,
     show_model_crop: bool = False,
+    show_turbo_steer_override: bool = False,
   ):
     super().__init__("camerad", stream_type)
     self._auto_switch_stream = auto_switch_stream
     self._show_model_crop = show_model_crop
+    self._show_turbo_steer_override = show_turbo_steer_override
     self._set_placeholder_color(BORDER_COLORS[UIStatus.DISENGAGED])
 
     self.device_camera: DeviceCameraConfig | None = None
@@ -102,6 +106,8 @@ class AugmentedRoadView(CameraView):
     # Draw all UI overlays
     self.model_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
+    if self._show_turbo_steer_override:
+      draw_intent_status(ui_state.sm, self._content_rect)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)
 
@@ -127,7 +133,12 @@ class AugmentedRoadView(CameraView):
   def _draw_border(self, rect: rl.Rectangle):
     rl.draw_rectangle_lines_ex(rect, UI_BORDER_SIZE, rl.BLACK)
     border_roundness = 0.12
-    border_color = BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
+    turbo_steer_override_active = self._show_turbo_steer_override and ui_state.turbo_steer_override_active
+    border_color = (
+      TURBO_STEER_OVERRIDE_COLOR
+      if turbo_steer_override_active
+      else BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
+    )
     border_rect = rl.Rectangle(rect.x + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
                                rect.width - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE)
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)

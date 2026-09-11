@@ -10,6 +10,7 @@ from openpilot.tools.turbo.gcs_window import monitor_geometry, patch_undecorated
 
 
 GCS_STANDARD_UI_CAMERA_ENV = "TURBO_GCS_STANDARD_UI_CAMERA"
+GCS_STEER_OVERRIDE_UI_ENV = "TURBO_GCS_STEER_OVERRIDE_UI"
 
 _CAMERA_STREAMS = {
   "road": VisionStreamType.VISION_STREAM_ROAD,
@@ -27,6 +28,7 @@ def _standard_ui_camera() -> VisionStreamType:
 
 def main() -> None:
   os.environ.setdefault("BIG", "1")
+  os.environ.setdefault(GCS_STEER_OVERRIDE_UI_ENV, "1")
 
   monitor = monitor_geometry(os.getenv("TURBO_GCS_DEBUG_UI_MONITOR", "eDP-1"))
   patch_undecorated_window("TURBO_GCS_DEBUG_UI_DECORATED")
@@ -55,6 +57,7 @@ def main() -> None:
       stream_type=onroad_stream,
       auto_switch_stream=False,
       show_model_crop=os.getenv(MODEL_CROP_ENV) == "1",
+      show_turbo_steer_override=True,
     ))
   else:
     MiciMainLayout()

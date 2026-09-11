@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import time
 import threading
 from collections.abc import Callable
@@ -10,11 +11,13 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
+from openpilot.selfdrive.ui.turbo_state import TURBO_STEER_ASSIST_STATE_SERVICE, is_turbo_steer_override_active
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
 
 BACKLIGHT_OFFROAD = 65 if HARDWARE.get_device_type() == "mici" else 50
 PARAM_UPDATE_TIME = 1 / 5.0
+TURBO_GCS_STEER_OVERRIDE_UI_ENV = "TURBO_GCS_STEER_OVERRIDE_UI"
 
 
 class UIStatus(Enum):
@@ -34,32 +37,35 @@ class UIState:
 
   def _initialize(self):
     self.params = Params()
-    self.sm = messaging.SubMaster(
-      [
-        "modelV2",
-        "controlsState",
-        "onroadEvents",
-        "liveCalibration",
-        "radarState",
-        "deviceState",
-        "pandaStates",
-        "carParams",
-        "driverMonitoringState",
-        "carState",
-        "driverStateV2",
-        "roadCameraState",
-        "wideRoadCameraState",
-        "managerState",
-        "selfdriveState",
-        "longitudinalPlan",
-        "gpsLocationExternal",
-        "carOutput",
-        "carControl",
-        "liveParameters",
-        "testJoystick",
-        "rawAudioData",
-      ]
-    )
+    services = [
+      "modelV2",
+      "controlsState",
+      "onroadEvents",
+      "liveCalibration",
+      "radarState",
+      "deviceState",
+      "pandaStates",
+      "carParams",
+      "driverMonitoringState",
+      "carState",
+      "driverStateV2",
+      "roadCameraState",
+      "wideRoadCameraState",
+      "managerState",
+      "selfdriveState",
+      "longitudinalPlan",
+      "gpsLocationExternal",
+      "carOutput",
+      "carControl",
+      "liveParameters",
+      "testJoystick",
+      "rawAudioData",
+    ]
+    self._turbo_steer_override_ui_enabled = os.getenv(TURBO_GCS_STEER_OVERRIDE_UI_ENV) == "1"
+    if self._turbo_steer_override_ui_enabled:
+      services.append(TURBO_STEER_ASSIST_STATE_SERVICE)
+      services.extend(["turboIntentState", "turboIntentRequest"])
+    self.sm = messaging.SubMaster(services)
 
     self.prime_state = PrimeState()
 
@@ -106,6 +112,12 @@ class UIState:
   @property
   def engaged(self) -> bool:
     return self.started and self.sm["selfdriveState"].enabled
+
+  @property
+  def turbo_steer_override_active(self) -> bool:
+    if not self._turbo_steer_override_ui_enabled:
+      return False
+    return is_turbo_steer_override_active(self.sm, self.started)
 
   def is_onroad(self) -> bool:
     return self.started
