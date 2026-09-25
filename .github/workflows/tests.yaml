@@ -134,7 +134,13 @@ jobs:
     - name: Run replay
       timeout-minutes: ${{ contains(runner.name, 'nsc') && 2 || 20 }}
       continue-on-error: ${{ github.ref == 'refs/heads/master' }}
-      run: openpilot/selfdrive/test/process_replay/test_processes.py -j$(nproc)
+      run: |
+        REPLAY_ARGS=()
+        # Fork changes have no matching commaai reference artifacts for these processes.
+        if [ "$GITHUB_REPOSITORY" != "commaai/openpilot" ]; then
+          REPLAY_ARGS+=(--blacklist-procs card radard plannerd)
+        fi
+        openpilot/selfdrive/test/process_replay/test_processes.py -j$(nproc) "${REPLAY_ARGS[@]}"
     - name: Print diff
       id: print-diff
       if: always()

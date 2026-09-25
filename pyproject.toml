@@ -47,6 +47,7 @@ dependencies = [
   # body / webrtcd
   "av",
   "aiortc",
+  "aiohttp",
 
   # panda
   "libusb1",

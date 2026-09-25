@@ -1,9 +1,11 @@
 import numpy as np
+import time
 import pyray as rl
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
+from openpilot.selfdrive.ui.turbo_intent import STATE_SERVICE, intent_border, draw_intent_border
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.mici.onroad.driver_state import DriverStateRenderer
@@ -237,6 +239,14 @@ class AugmentedRoadView(CameraView):
 
     # End clipping region
     rl.end_scissor_mode()
+
+    if ui_state.sm.seen.get(STATE_SERVICE, False):
+      visual = intent_border(ui_state.sm, time.monotonic(), engaged=ui_state.engaged,
+                             override=ui_state.turbo_steer_override_active or alert_to_render is not None,
+                             critical=bool(alert_to_render and alert_to_render.status == log.SelfdriveState.AlertStatus.critical))
+      outline = rl.Rectangle(self._content_rect.x + 8, self._content_rect.y + 8,
+                             self._content_rect.width - 16, self._content_rect.height - 16)
+      draw_intent_border(outline, visual, 8)
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds

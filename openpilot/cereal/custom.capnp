@@ -19,22 +19,119 @@ struct CustomReserved1 @0xaedffd8f31e7b55d {
 struct CustomReserved2 @0xf35cc4560bbf6ec2 {
 }
 
-struct CustomReserved3 @0xda96579883444c35 {
+struct TurboSteerAssist @0xda96579883444c35 {
+  active @0 :Bool;
+  requestedSteeringAngleDeg @1 :Float32;
+  wheelSteeringAngleDeg @2 :Float32;
+  baseModelSteeringAngleDeg @3 :Float32;
+  sequence @4 :UInt32;
+  baseModelLogMonoTime @5 :UInt64;
 }
 
-struct CustomReserved4 @0x80ae746ee2596b11 {
+struct TurboTeleopCommand @0x80ae746ee2596b11 {
+  command @0 :Command;
+
+  enum Command {
+    cruiseEnable @0;
+    cruiseCancel @1;
+    headlightsOn @2;
+    headlightsOff @3;
+  }
 }
 
-struct CustomReserved5 @0xa5cd762cd951a455 {
+struct TurboSteerAssistState @0xa5cd762cd951a455 {
+  applied @0 :Bool;
+  status @1 :Text;
+  targetAvailable @2 :Bool;
+  requestedSteeringAngleDeg @3 :Float32;
+  modelSteeringAngleDeg @4 :Float32;
+  finalSteeringAngleDeg @5 :Float32;
+  sourceSequence @6 :UInt32;
+  sourceBaseModelLogMonoTime @7 :UInt64;
 }
 
-struct CustomReserved6 @0xf98d843bfd7004a3 {
+struct TurboIntentRequest @0xf98d843bfd7004a3 {
+  protocolVersion @0 :UInt16;
+  operatorId @1 :Text;
+  requestId @2 :UInt64;
+  sessionId @3 :Text;
+  epoch @4 :Text;
+  action @5 :Action;
+  direction @6 :Direction;
+  baseFeedbackLogMonoTime @7 :UInt64;
+  ready @8 :Bool;
+  reverse @9 :Bool;
+  localStatus @10 :Text;
+  createdMonoTime @11 :UInt64;
+  maneuver @12 :Maneuver;
+
+  enum Action { none @0; request @1; cancel @2; }
+  enum Direction { none @0; left @1; right @2; }
+  enum Maneuver { none @0; laneChange @1; turn @2; }
 }
 
-struct CustomReserved7 @0xb86e6369214c01c8 {
+struct TurboIntentState @0xb86e6369214c01c8 {
+  protocolVersion @0 :UInt16;
+  sessionId @1 :Text;
+  epoch @2 :Text;
+  operatorId @3 :Text;
+  requestId @4 :UInt64;
+  direction @5 :TurboIntentRequest.Direction;
+  status @6 :Text;
+  reason @7 :Text;
+  mode @8 :Text;
+  available @9 :Bool;
+  minSpeed @10 :Float32;
+  maxSpeed @11 :Float32;
+  pulseFrameId @12 :UInt32;
+  pulseMonoTime @13 :UInt64;
+  laneChangeProbability @14 :Float32;
+  operatorOverride @15 :Bool;
+  maneuver @16 :TurboIntentRequest.Maneuver;
+  modelResponseProbability @17 :Float32;
+  oppositeTurnProbability @18 :Float32;
+  consumedDesire @19 :UInt8;
+  phase @20 :Text;
+  outcome @21 :Text;
+  availabilityReason @22 :Text;
+  faultReason @23 :Text;
+  responseObserved @24 :Bool;
+  modelSampleMonoTime @25 :UInt64;
+  modelSampleValid @26 :Bool;
+  turnLeftProbability @27 :Float32;
+  turnRightProbability @28 :Float32;
+  laneChangeLeftProbability @29 :Float32;
+  laneChangeRightProbability @30 :Float32;
+  elapsedS @31 :Float32;
+  cooldownRemainingS @32 :Float32;
+  historyRemaining @33 :UInt32;
+  outcomeAgeS @34 :Float32;
+  responseDwellS @35 :Float32;
+  clearDwellS @36 :Float32;
+  receipt @37 :Receipt;
+  baselineProbabilities @38 :List(Float32);
+  peakResponseProbability @39 :Float32;
+  oppositeDominant @40 :Bool;
+
+  struct Receipt {
+    protocolVersion @0 :UInt16;
+    sessionId @1 :Text;
+    epoch @2 :Text;
+    operatorId @3 :Text;
+    requestId @4 :UInt64;
+    maneuver @5 :TurboIntentRequest.Maneuver;
+    direction @6 :TurboIntentRequest.Direction;
+    action @7 :TurboIntentRequest.Action;
+    result @8 :Text;
+    status @9 :Text;
+    pulseMonoTime @10 :UInt64;
+  }
 }
 
-struct CustomReserved8 @0xf416ec09499d9d19 {
+struct TurboIntentLinkState @0xf416ec09499d9d19 {
+  # Local UGV bridge heartbeat; never accepted from the network.
+  sessionId @0 :Text;
+  connected @1 :Bool;
 }
 
 struct CustomReserved9 @0xa1680744031fdb2d {
