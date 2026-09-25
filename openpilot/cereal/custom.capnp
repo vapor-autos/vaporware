@@ -91,6 +91,41 @@ struct TurboIntentState @0xb86e6369214c01c8 {
   modelResponseProbability @17 :Float32;
   oppositeTurnProbability @18 :Float32;
   consumedDesire @19 :UInt8;
+  phase @20 :Text;
+  outcome @21 :Text;
+  availabilityReason @22 :Text;
+  faultReason @23 :Text;
+  responseObserved @24 :Bool;
+  modelSampleMonoTime @25 :UInt64;
+  modelSampleValid @26 :Bool;
+  turnLeftProbability @27 :Float32;
+  turnRightProbability @28 :Float32;
+  laneChangeLeftProbability @29 :Float32;
+  laneChangeRightProbability @30 :Float32;
+  elapsedS @31 :Float32;
+  cooldownRemainingS @32 :Float32;
+  historyRemaining @33 :UInt32;
+  outcomeAgeS @34 :Float32;
+  responseDwellS @35 :Float32;
+  clearDwellS @36 :Float32;
+  receipt @37 :Receipt;
+  baselineProbabilities @38 :List(Float32);
+  peakResponseProbability @39 :Float32;
+  oppositeDominant @40 :Bool;
+
+  struct Receipt {
+    protocolVersion @0 :UInt16;
+    sessionId @1 :Text;
+    epoch @2 :Text;
+    operatorId @3 :Text;
+    requestId @4 :UInt64;
+    maneuver @5 :TurboIntentRequest.Maneuver;
+    direction @6 :TurboIntentRequest.Direction;
+    action @7 :TurboIntentRequest.Action;
+    result @8 :Text;
+    status @9 :Text;
+    pulseMonoTime @10 :UInt64;
+  }
 }
 
 struct TurboIntentLinkState @0xf416ec09499d9d19 {

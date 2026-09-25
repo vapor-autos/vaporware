@@ -119,12 +119,24 @@ def test_override_disengagement_and_critical_alert_take_priority():
   assert intent_border(sm, 10.0, engaged=True) == IntentBorder()
 
 
-@pytest.mark.parametrize("status", ["timedOut", "noModelResponse"])
-def test_takeover_remains_red_instead_of_silently_looking_complete(status):
+@pytest.mark.parametrize("status", ["unconfirmed", "expired", "stopped", "responseCleared"])
+def test_ordinary_terminal_results_are_not_takeover_faults(status):
   sm = SM()
-  sm[STATE_SERVICE].from_dict({"mode": "execute", "status": status, "direction": "left"})
-  assert intent_border(sm, 10.0, engaged=True, override=True) == IntentBorder(takeover=True)
+  sm[STATE_SERVICE].from_dict({"mode": "execute", "status": status, "outcome": status, "phase": "cooldown", "outcomeAgeS": 2,
+                             "direction": "left"})
+  assert intent_border(sm, 10.0, engaged=True) == IntentBorder(side="left", dim=True)
+  assert intent_border(sm, 10.0, engaged=True, override=True) == IntentBorder()
   assert intent_border(sm, 10.0, engaged=False) == IntentBorder()
+
+
+def test_live_fault_and_unresolved_delivery_remain_red_until_authoritative_recovery():
+  sm = SM()
+  sm[STATE_SERVICE].from_dict({"mode": "execute", "status": "expired", "phase": "idle", "direction": "left", "faultReason": "model_stale"})
+  assert intent_border(sm, 10.0, engaged=True, override=True) == IntentBorder(takeover=True)
+  sm[STATE_SERVICE].faultReason = ""
+  assert intent_border(sm, 10.0, engaged=True) == IntentBorder()
+  sm[REQUEST_SERVICE].localStatus = "unknown"
+  assert intent_border(sm, 10.0, engaged=True) == IntentBorder(takeover=True)
 
 
 @pytest.mark.parametrize("age", [-0.001, 0.351, 10])

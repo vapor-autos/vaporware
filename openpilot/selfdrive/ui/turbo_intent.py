@@ -6,7 +6,9 @@ from openpilot.selfdrive.controls.lib.turbo_intent import PROTOCOL_VERSION, REQU
 
 _STATUS_TEXT = {
   "pending": "REQUESTING", "awaitingEvaluation": "WAITING FOR MODEL", "executing": "EXECUTING",
-  "shadow": "SHADOW OK", "rejected": "REJECTED", "completed": "MODEL COMPLETE",
+  "shadow": "SHADOW OK", "rejected": "REJECTED", "completed": "RESPONSE CLEARED",
+  "responseCleared": "RESPONSE CLEARED", "unconfirmed": "UNCONFIRMED", "stopped": "STOPPED", "faulted": "CHECK CONTROL",
+  "ugv_unavailable": "WAITING", "rejected_busy": "BUSY",
   "canceling": "CANCELING", "canceled": "CANCELED", "expired": "EXPIRED", "interrupted": "INTERRUPTED",
   "unknown": "STATUS UNKNOWN", "timedOut": "TAKE OVER", "noModelResponse": "TAKE OVER",
   "operator_not_ready": "NOT READY", "feedback_unavailable": "LINK STALE", "busy_or_unknown": "BUSY",
@@ -78,6 +80,7 @@ def intent_label(sm, now: float) -> str:
 
 
 LANE_CHANGE_COLOR = (0xAD, 0x66, 0xFF, 0xFF)  # Violet; distinct from engagement/override/alerts.
+COOLDOWN_COLOR = (0x68, 0x3D, 0x99, 0xFF)
 TAKEOVER_COLOR = (0xC9, 0x22, 0x31, 0xFF)
 
 
@@ -85,6 +88,11 @@ TAKEOVER_COLOR = (0xC9, 0x22, 0x31, 0xFF)
 class IntentBorder:
   side: str = "none"
   takeover: bool = False
+  dim: bool = False
+
+
+def intent_color(visual: IntentBorder):
+  return COOLDOWN_COLOR if visual.dim else LANE_CHANGE_COLOR
 
 
 def intent_border(sm, now: float, *, engaged: bool, override: bool = False, critical: bool = False) -> IntentBorder:
@@ -98,14 +106,27 @@ def intent_border(sm, now: float, *, engaged: bool, override: bool = False, crit
   if state.mode != "execute":
     return IntentBorder()
   fresh = sm.valid[STATE_SERVICE] and 0 <= now - sm.recv_time[STATE_SERVICE] <= FEEDBACK_TIMEOUT_S
-  active = str(state.status) in ("executing", "timedOut", "noModelResponse")
-  # Losing authoritative feedback during a maneuver must not look like completion.
-  if active and (not fresh or str(state.status) in ("timedOut", "noModelResponse")):
+  active = str(state.status) in ("awaitingEvaluation", "executing") or str(state.phase) == "cooldown"
+  local_unknown = (sm.seen.get(REQUEST_SERVICE, False) and sm.valid[REQUEST_SERVICE] and
+                   0 <= now - sm.recv_time[REQUEST_SERVICE] <= FEEDBACK_TIMEOUT_S and
+                   str(sm[REQUEST_SERVICE].localStatus) == "unknown")
+  # A bounded request outcome is not a control fault. Never infer success from
+  # missing authoritative feedback, however, even during cooldown/reconciliation.
+  if local_unknown or (active and not fresh) or (fresh and state.faultReason):
     return IntentBorder(takeover=True)
-  if not fresh or override or state.operatorOverride or state.status != "executing":
+  if not fresh or override or state.operatorOverride:
     return IntentBorder()
   side = str(state.direction)
-  return IntentBorder(side=side if side in ("left", "right") else "none")
+  if side not in ("left", "right"):
+    return IntentBorder()
+  if state.status == "executing":
+    return IntentBorder(side=side)
+  if state.phase == "cooldown":
+    age = state.outcomeAgeS + max(0.0, now - sm.recv_time[STATE_SERVICE])
+    if state.outcome in ("unconfirmed", "expired") and age < 1.0:
+      return IntentBorder(side=side, dim=not (age < 0.2 or 0.4 <= age < 0.6))
+    return IntentBorder(side=side, dim=True)
+  return IntentBorder()
 
 
 def half_border_clip(rect, side: str, thickness: float) -> tuple[int, int, int, int]:
@@ -127,7 +148,7 @@ def draw_intent_border(rect, visual: IntentBorder, thickness: float, roundness: 
   rl.begin_scissor_mode(*half_border_clip(rect, visual.side, thickness))
   try:
     # Clip a complete outline, not a half-width rectangle: no divider through video.
-    rl.draw_rectangle_rounded_lines_ex(rect, roundness, 10, thickness, rl.Color(*LANE_CHANGE_COLOR))
+    rl.draw_rectangle_rounded_lines_ex(rect, roundness, 10, thickness, rl.Color(*intent_color(visual)))
   finally:
     rl.end_scissor_mode()
 

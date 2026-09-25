@@ -11,12 +11,12 @@ INTENT_SUBSCRIPTIONS = [REQUEST_SERVICE, LINK_SERVICE, "g29", "turboSteerAssist"
 
 
 class TurboIntentRuntime:
-  def __init__(self, pm, config: IntentConfig | None = None):
+  def __init__(self, pm, config: IntentConfig | None = None, *, history_evaluations: int = 100):
     self.manager = TurboIntentManager(config or IntentConfig(
       mode=os.getenv("TURBO_INTENT_MODE", "shadow"),
       min_speed=float(os.getenv("TURBO_INTENT_MIN_SPEED", "2.0")),
       max_speed=float(os.getenv("TURBO_INTENT_MAX_SPEED", "5.0")),
-    ))
+    ), history_evaluations=history_evaluations)
     self.pm = pm
     self.last_publish = -float("inf")
     self.last_signature = None
@@ -50,23 +50,24 @@ class TurboIntentRuntime:
     self.publish(now)
     return self.manager.desire
 
-  def after_inference(self, desire, desire_state: Sequence[float], frame_id: int, now: float):
+  def after_inference(self, desire, desire_state: Sequence[float], frame_id: int, now: float, *, model_valid: bool = True):
     def probability(index):
       return float(desire_state[index]) if len(desire_state) > index else math.nan
 
     lane_change_probability = probability(log.Desire.laneChangeLeft) + probability(log.Desire.laneChangeRight)
-    response, opposite = lane_change_probability, 0.0
-    if self.manager.request.get("maneuver") == "turn":
-      left = self.manager.request.get("direction") == "left"
-      response = probability(log.Desire.turnLeft if left else log.Desire.turnRight)
-      opposite = probability(log.Desire.turnRight if left else log.Desire.turnLeft)
+    turn = self.manager.request.get("maneuver") == "turn"
+    left = self.manager.request.get("direction") != "right"
+    left_index, right_index = (log.Desire.turnLeft, log.Desire.turnRight) if turn else (log.Desire.laneChangeLeft, log.Desire.laneChangeRight)
+    response, opposite = probability(left_index if left else right_index), probability(right_index if left else left_index)
+    scores = tuple(probability(i) for i in (log.Desire.turnLeft, log.Desire.turnRight, log.Desire.laneChangeLeft, log.Desire.laneChangeRight))
     self.manager.evaluated(desire, response, frame_id, now,
-                           opposite_probability=opposite, lane_change_probability=lane_change_probability)
+                           opposite_probability=opposite, lane_change_probability=lane_change_probability, scores=scores, model_valid=model_valid)
     self.publish(now)
 
   def publish(self, now: float):
     state = self.manager.snapshot(now)
-    signature = (state["epoch"], state["operatorId"], state["requestId"], state["maneuver"], state["status"], state["reason"])
+    signature = (state["epoch"], state["operatorId"], state["requestId"], state["maneuver"], state["status"], state["reason"],
+                 state["phase"], state["available"], state["faultReason"], tuple(state["receipt"].items()))
     if now - self.last_publish >= 0.1 or signature != self.last_signature:
       msg = messaging.new_message(STATE_SERVICE, valid=True)
       msg.turboIntentState = state

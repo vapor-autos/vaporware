@@ -6,7 +6,7 @@ from openpilot.tools.turbo.g29_compat import TurboG29
 from openpilot.tools.turbo.intent import MANEUVER_BUTTONS, IntentPublishSchedule, PaddleIntentController, read_intent_feedback
 
 
-FEEDBACK = {"protocolVersion": PROTOCOL_VERSION, "sessionId": "session", "epoch": "epoch", "status": "idle",
+FEEDBACK = {"protocolVersion": PROTOCOL_VERSION, "sessionId": "session", "epoch": "epoch", "status": "idle", "available": True,
             "maneuver": "laneChange", "direction": "left"}
 
 
@@ -71,12 +71,13 @@ def test_unready_request_is_not_queued(kwargs):
 def test_unknown_acknowledgment_does_not_allow_retry_press():
   c = controller()
   step(c, {"left_paddle": True}, ["left_paddle"])
-  wire = step(c, now=10.36)
-  assert wire["action"] == "none" and wire["localStatus"] == "unknown"
-  assert step(c, {"right_paddle": True}, ["right_paddle"], now=10.4)["localStatus"] == "unknown"
+  assert step(c, now=10.36)["action"] == "none"
+  wire = step(c, now=11.01)
+  assert wire["action"] == "cancel" and wire["localStatus"] == "unknown"
+  assert step(c, {"right_paddle": True}, ["right_paddle"], now=11.1)["localStatus"] == "unknown"
   assert c.sequence == 1
   ack = {**FEEDBACK, "operatorId": c.operator_id, "requestId": 1, "status": "rejected"}
-  step(c, feedback=ack, now=10.41)
+  step(c, feedback=ack, now=11.2)
   assert not c.uncertain
 
 
@@ -85,7 +86,7 @@ def test_l2_cancels_pending_but_cannot_claim_to_abort_execution():
   r = step(c, {"left_paddle": True}, ["left_paddle"])
   canceled = step(c, {"L2": True}, ["L2"], now=10.01)
   assert canceled["action"] == "cancel" and canceled["requestId"] == r["requestId"]
-  ack = {**FEEDBACK, "operatorId": c.operator_id, "requestId": 1, "status": "executing"}
+  ack = {**FEEDBACK, "operatorId": c.operator_id, "requestId": 1, "status": "executing", "pulseMonoTime": 10_000_000_000}
   assert step(c, {"L2": True}, feedback=ack, now=10.02)["localStatus"] == "executing"
 
 
@@ -97,7 +98,63 @@ def test_pending_ack_does_not_swallow_cancel():
   assert step(c, feedback={**ack, "status": "canceled"}, now=10.02)["action"] == "none"
 
 
-@pytest.mark.parametrize("status", ["awaitingEvaluation", "executing", "timedOut", "noModelResponse"])
+def receipt(request, result, *, action=None, **changes):
+  keys = ("protocolVersion", "sessionId", "epoch", "operatorId", "requestId", "maneuver", "direction", "action")
+  return {**{k: request[k] for k in keys}, "result": result, "status": "", "action": action or request["action"], **changes}
+
+
+def test_busy_request_receipt_resolves_without_replacing_active_transaction():
+  c = controller()
+  r = step(c, {"left_paddle": True}, ["left_paddle"])
+  feedback = {**FEEDBACK, "operatorId": "other", "requestId": 70, "status": "executing", "available": False,
+              "receipt": receipt(r, "rejected_busy")}
+  result = step(c, feedback=feedback, now=10.1)
+  assert result["action"] == "none" and result["localStatus"] == "rejected_busy"
+  assert c.pending is None and not c.uncertain
+
+
+def test_lost_request_reconciles_same_id_and_requires_authoritative_available():
+  c = controller()
+  r = step(c, {"left_paddle": True}, ["left_paddle"])
+  expired = step(c, now=10.4)
+  assert expired["action"] == "none" and c.pending is not None
+  reconcile = step(c, now=11.1)
+  assert reconcile["action"] == "cancel" and reconcile["requestId"] == r["requestId"] and c.uncertain
+  feedback = {**FEEDBACK, "available": False, "phase": "cooldown", "receipt": receipt(r, "canceled_before_consumption", action="cancel")}
+  assert step(c, feedback=feedback, now=11.2)["action"] == "none"
+  assert not c.uncertain and c.pending is None
+  assert step(c, {"right_paddle": True}, ["right_paddle"], feedback=feedback, now=11.3)["action"] == "none"
+  ready = {**feedback, "available": True, "phase": "idle"}
+  assert step(c, {"right_paddle": True}, feedback=ready, now=12.4)["action"] == "none"
+  step(c, feedback=ready, now=12.5)
+  assert step(c, {"right_paddle": True}, ["right_paddle"], feedback=ready, now=12.6)["requestId"] == 2
+
+
+@pytest.mark.parametrize("field,value", [("action", "request"), ("epoch", "old"), ("sessionId", "old"),
+                                         ("protocolVersion", 2), ("direction", "right"), ("maneuver", "turn"),
+                                         ("requestId", 2), ("operatorId", "other"), ("result", "stale_context")])
+def test_wrong_cancel_receipt_never_clears_uncertainty(field, value):
+  c = controller()
+  r = step(c, {"left_paddle": True}, ["left_paddle"])
+  step(c, now=11.1)
+  bad_receipt = receipt(r, "canceled_before_consumption", action="cancel")
+  bad_receipt[field] = value
+  result = step(c, feedback={**FEEDBACK, "receipt": bad_receipt}, now=11.2)
+  assert result["action"] == "cancel" and c.uncertain
+
+
+def test_late_consumed_state_resolves_unknown_but_cannot_retrigger():
+  c = controller()
+  r = step(c, {"left_paddle": True}, ["left_paddle"])
+  step(c, now=11.1)
+  feedback = {**FEEDBACK, **r, "status": "executing", "available": False, "pulseMonoTime": 10_100_000_000}
+  assert step(c, feedback=feedback, now=11.2)["action"] == "none"
+  assert not c.uncertain
+  assert step(c, {"right_paddle": True}, ["right_paddle"], feedback=feedback, now=11.3)["action"] == "none"
+  assert c.sequence == 1
+
+
+@pytest.mark.parametrize("status", ["awaitingEvaluation", "executing"])
 def test_busy_ugv_never_queues_paddle(status):
   c = controller()
   assert step(c, {"left_paddle": True}, ["left_paddle"], feedback={**FEEDBACK, "status": status})["action"] == "none"
@@ -203,23 +260,23 @@ def test_actual_feedback_loss_cancels_pending_without_forgetting_unknown():
   c = controller()
   r = step(c, {"right_paddle": True}, ["right_paddle"])
   lost = step(c, fresh=False, feedback={}, now=10.1)
-  assert lost["action"] == "cancel" and lost["localStatus"] == "canceling"
+  assert lost["action"] == "none" and lost["localStatus"] == "canceling"
   assert lost["baseFeedbackLogMonoTime"] == r["baseFeedbackLogMonoTime"]
   assert c.context == ("session", "epoch")
-  assert step(c, fresh=False, feedback={}, now=10.36)["localStatus"] == "unknown"
-  assert step(c, now=10.4)["localStatus"] == "unknown"
-  assert step(c, {"right_paddle": True}, ["right_paddle"], now=10.42)["action"] == "none"
+  assert step(c, fresh=False, feedback={}, now=11.01)["localStatus"] == "unknown"
+  assert step(c, now=11.1)["localStatus"] == "unknown"
+  assert step(c, {"right_paddle": True}, ["right_paddle"], now=11.12)["action"] == "cancel"
   assert c.uncertain and c.sequence == 1
   late_ack = {**FEEDBACK, "direction": "right", "operatorId": c.operator_id, "requestId": 1, "status": "rejected"}
-  assert step(c, feedback=late_ack, now=10.5)["localStatus"] == "rejected"
+  assert step(c, feedback=late_ack, now=11.2)["localStatus"] == "rejected"
 
 
 def test_new_epoch_clears_unknown_but_not_from_a_held_paddle():
   c = controller()
   step(c, {"left_paddle": True}, ["left_paddle"])
-  step(c, now=10.4)
+  step(c, now=11.01)
   assert c.uncertain
-  wire = step(c, {"left_paddle": True}, ["left_paddle"], feedback={**FEEDBACK, "epoch": "new"}, now=10.42)
+  wire = step(c, {"left_paddle": True}, ["left_paddle"], feedback={**FEEDBACK, "epoch": "new"}, now=11.1)
   assert wire["action"] == "none" and not c.uncertain
   assert not c.last_request
 
@@ -279,7 +336,7 @@ def test_wrong_kind_ack_cannot_hide_pending_turn():
   r = step(c, {"S": True}, ["S"])
   ack = {**FEEDBACK, **r, "status": "executing", "maneuver": "laneChange"}
   assert step(c, feedback=ack, now=10.1)["action"] == "request"
-  assert step(c, feedback=ack, now=10.4)["localStatus"] == "unknown"
+  assert step(c, feedback=ack, now=11.01)["localStatus"] == "unknown"
   assert step(c, feedback=ack, now=10.42)["localStatus"] == "unknown"
 
 

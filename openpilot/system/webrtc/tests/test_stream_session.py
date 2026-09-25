@@ -11,6 +11,7 @@ from aiortc import RTCDataChannel
 from aiortc.mediastreams import VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 import capnp
 from openpilot.cereal import messaging, log
+from openpilot.selfdrive.controls.lib.turbo_intent import PROTOCOL_VERSION
 
 from openpilot.system.webrtc.webrtcd import (
   CerealOutgoingMessageProxy, CerealIncomingMessageProxy, FEEDBACK_SERVICE_RATES_HZ, UdpFeedbackChannel, StreamSession,
@@ -325,9 +326,9 @@ class TestStreamSession:
     assert forwarded.turboSteerAssist.requestedSteeringAngleDeg == 12.5
 
   @pytest.mark.parametrize("session,valid,protocol,action,accepted", [
-    ("session", True, 2, "request", True), ("session", True, 2, "cancel", True),
-    ("old-session", True, 2, "request", False), ("session", False, 2, "request", False),
-    ("session", True, 1, "request", False), ("session", True, 2, "none", False),
+    ("session", True, PROTOCOL_VERSION, "request", True), ("session", True, PROTOCOL_VERSION, "cancel", True),
+    ("old-session", True, PROTOCOL_VERSION, "request", False), ("session", False, PROTOCOL_VERSION, "request", False),
+    ("session", True, 2, "request", False), ("session", True, PROTOCOL_VERSION, "none", False),
   ])
   def test_intent_is_bound_to_real_bridge_session(self, mocker, session, valid, protocol, action, accepted):
     pm = mocker.Mock()
@@ -349,7 +350,7 @@ class TestStreamSession:
   def test_intent_kind_and_direction_are_validated_before_forwarding(self, mocker, kind, direction):
     pm = mocker.Mock()
     proxy = CerealIncomingMessageProxy(pm, session_id="session")
-    data = {"sessionId": "session", "protocolVersion": 2, "action": "request", "direction": direction}
+    data = {"sessionId": "session", "protocolVersion": PROTOCOL_VERSION, "action": "request", "direction": direction}
     if kind is not None:
       data["maneuver"] = kind
     proxy.send(json.dumps({"type": "turboIntentRequest", "valid": True, "data": data}).encode())

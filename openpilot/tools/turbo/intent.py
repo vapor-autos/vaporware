@@ -3,7 +3,7 @@ import uuid
 import time
 from dataclasses import dataclass
 
-from openpilot.selfdrive.controls.lib.turbo_intent import BUSY_STATUSES, CONTEXT_TIMEOUT_S, FEEDBACK_TIMEOUT_S, PROTOCOL_VERSION, STATE_SERVICE
+from openpilot.selfdrive.controls.lib.turbo_intent import ACK_TIMEOUT_S, BUSY_STATUSES, CONTEXT_TIMEOUT_S, FEEDBACK_TIMEOUT_S, PROTOCOL_VERSION, STATE_SERVICE
 
 MANEUVER_BUTTONS = {
   "left_paddle": ("laneChange", "left"), "right_paddle": ("laneChange", "right"),
@@ -49,13 +49,32 @@ class ManeuverIntentController:
     self.uncertain = False
     self.last_request: dict = {}
 
+  def _acknowledgment(self, feedback: dict) -> str | None:
+    if self.pending is None:
+      return None
+    keys = ("protocolVersion", "sessionId", "epoch", "operatorId", "requestId", "maneuver", "direction")
+    def matches(data):
+      return all(data.get(k) == self.pending.get(k) for k in keys)
+
+    receipt = feedback.get("receipt", {})
+    resolved = ("accepted", "rejected", "rejected_busy", "retired", "canceled_before_consumption", "already_consumed")
+    if matches(receipt) and receipt.get("action") == self.pending["action"] and receipt.get("result") in resolved:
+      return receipt.get("status") or receipt["result"]
+    status = feedback.get("status")
+    if matches(feedback) and status not in (None, "idle"):
+      # The active state itself is also an acknowledgement, except that receiving
+      # a pending request is not proof that its cancellation was processed.
+      if self.pending["action"] == "request" or feedback.get("pulseMonoTime", 0) > 0 or status not in BUSY_STATUSES:
+        return status
+    return None
+
   def update(self, buttons: dict, events: list[dict], feedback: dict, feedback_time: int,
              fresh: bool, ready: bool, reverse: bool, now: float) -> dict:
     held = [name for name in MANEUVER_BUTTONS if buttons.get(name)]
     downs = [e.get("control") for e in events if e.get("type") == "button_down"]
     maneuver_downs = [b for b in downs if b in MANEUVER_BUTTONS]
     context = (feedback.get("sessionId", ""), feedback.get("epoch", "")) if fresh else self.context
-    changed = fresh and all(context) and context != self.context
+    changed = fresh and feedback.get("protocolVersion") == PROTOCOL_VERSION and all(context) and context != self.context
     if changed:
       self.context, self.pending, self.released = context, None, False
       self.uncertain = False
@@ -69,32 +88,30 @@ class ManeuverIntentController:
 
     wire = None
     if self.pending is not None:
-      ack = (fresh and feedback.get("requestId") == self.pending["requestId"] and
-             feedback.get("operatorId") == self.operator_id and feedback.get("status") != "idle" and
-             feedback.get("protocolVersion") == PROTOCOL_VERSION and
-             feedback.get("maneuver") == self.pending["maneuver"] and feedback.get("direction") == self.pending["direction"])
       invalidate = "L2" in downs or bool(buttons.get("L2")) or not ready or reverse or not fresh
-      if invalidate:
-        if self.pending["action"] != "cancel":
-          self.pending = {**self.pending, "action": "cancel",
-                          "baseFeedbackLogMonoTime": feedback_time if fresh else self.pending["baseFeedbackLogMonoTime"]}
-          self.last_status, self.status_since = "canceling", now
-        wire = self.pending
-      if self.pending["action"] == "cancel" and feedback.get("status") == "awaitingEvaluation":
-        ack = False  # Receipt of the request is not acknowledgment of its cancellation.
-      if ack:
-        self.last_status, self.status_since = feedback["status"], now
+      if invalidate and self.pending["action"] != "cancel":
+        self.pending = {**self.pending, "action": "cancel"}
+        self.last_status, self.status_since = "canceling", now
+      ack = self._acknowledgment(feedback) if fresh else None
+      if ack is not None:
+        self.last_status, self.status_since = ack, now
         self.pending = None
         self.uncertain = False
-        wire = None
-      elif now - self.pending_since > CONTEXT_TIMEOUT_S:
-        self.last_status, self.status_since = "unknown", now
-        # Do not automatically issue another request when an acknowledgment is lost.
-        self.pending = None
-        self.uncertain = True
-        wire = None
       else:
-        wire = self.pending
+        age = now - self.pending_since
+        if age >= ACK_TIMEOUT_S:
+          if not self.uncertain:
+            self.last_status, self.status_since = "unknown", now
+          self.uncertain = True
+          # Reconcile/tombstone the same ID; never turn a delayed request into a
+          # fresh executable command or clear uncertainty on a local timer.
+          self.pending = {**self.pending, "action": "cancel"}
+        if self.pending["action"] == "cancel":
+          if fresh and feedback.get("protocolVersion") == PROTOCOL_VERSION:
+            self.pending = {**self.pending, "baseFeedbackLogMonoTime": feedback_time}
+            wire = self.pending
+        elif age <= CONTEXT_TIMEOUT_S:
+          wire = self.pending
 
     busy = self.pending is not None or (fresh and feedback.get("status") in BUSY_STATUSES)
     if maneuver_downs and can_press:
@@ -109,6 +126,8 @@ class ManeuverIntentController:
         reason = "feedback_unavailable"
       elif not ready or reverse:
         reason = "operator_not_ready"
+      elif not feedback.get("available", False):
+        reason = "ugv_unavailable"
       if reason:
         self.last_status, self.status_since = reason, now
       else:
@@ -126,12 +145,6 @@ class ManeuverIntentController:
         wire = self.pending
         self.last_status, self.status_since = "pending", now
 
-    if (fresh and self.uncertain and feedback.get("operatorId") == self.operator_id and feedback.get("requestId") == self.sequence and
-        feedback.get("protocolVersion") == PROTOCOL_VERSION and feedback.get("maneuver") == self.last_request.get("maneuver") and
-        feedback.get("direction") == self.last_request.get("direction") and
-        feedback.get("status") not in (None, "idle")):
-      self.last_status, self.status_since = feedback.get("status", "unknown"), now
-      self.uncertain = False
     if self.last_status not in ("pending", "unknown") and now - self.status_since > 2.0:
       self.last_status = "idle"
     # Retain identity for UI correlation even after the action is acknowledged.

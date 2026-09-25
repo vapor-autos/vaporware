@@ -40,7 +40,7 @@ def load_widget(name):
   from openpilot.system.ui.widgets.label import gui_app as label_app
   from openpilot.selfdrive.ui.turbo_intent import LANE_CHANGE_COLOR, TAKEOVER_COLOR, intent_border, draw_intent_border
   from openpilot.selfdrive.ui.onroad.augmented_road_view import AugmentedRoadView
-  from openpilot.selfdrive.controls.lib.turbo_intent import STATE_SERVICE, REQUEST_SERVICE
+  from openpilot.selfdrive.controls.lib.turbo_intent import STATE_SERVICE, REQUEST_SERVICE, PROTOCOL_VERSION
 
   class BorderPreview(Widget):
     def _render(self, rect):
@@ -52,7 +52,7 @@ def load_widget(name):
       sm.valid = dict.fromkeys(services, True)
       sm.recv_time = dict.fromkeys(services, time.monotonic())
       scenario = ("left", "right", "completed", "override", "critical")[len(rendered)]
-      sm[STATE_SERVICE].from_dict({"protocolVersion": 2, "status": "completed" if scenario == "completed" else "executing",
+      sm[STATE_SERVICE].from_dict({"protocolVersion": PROTOCOL_VERSION, "status": "responseCleared" if scenario == "completed" else "executing",
                                  "mode": "execute", "direction": "right" if scenario == "right" else "left"})
       sm[REQUEST_SERVICE].localStatus = "idle"
       assert label_app is widget_app is application.gui_app

@@ -47,10 +47,18 @@ def ready_runtime(mode="execute"):
   sm = FakeSubMaster()
   pm = FakePubMaster()
   runtime = TurboIntentRuntime(pm, IntentConfig(mode=mode))
-  runtime.before_inference(sm, 10.0)
+  warm_runtime(runtime, sm)
+  return runtime, sm, pm
+
+
+def warm_runtime(runtime, sm):
+  for frame in range(27):
+    now = round(9.25 + frame * .05, 8)
+    sm.advance(now)
+    runtime.before_inference(sm, now)
+    runtime.after_inference(log.Desire.none, [1, 0, 0, 0, 0, 0, 0, 0], frame, now + .001)
   sm.advance(10.6)
   runtime.before_inference(sm, 10.6)
-  return runtime, sm, pm
 
 
 def send_request(runtime, sm, now=10.6, button="left_paddle"):
@@ -93,7 +101,7 @@ def test_lane_change_or_missing_or_opposite_output_cannot_acknowledge_left_turn(
   desire = runtime.before_inference(sm, 10.61)
   runtime.after_inference(desire, probabilities, 123, 10.62)
   runtime.after_inference(log.Desire.none, probabilities, 224, 15.7)
-  assert runtime.manager.status == "noModelResponse"
+  assert runtime.manager.status == ("faulted" if len(probabilities) < 8 else "unconfirmed")
 
 
 @pytest.mark.parametrize("mode", ["shadow", "execute"])
@@ -122,9 +130,7 @@ def test_uncapped_execute_environment_reaches_model_without_hardware(monkeypatch
   sm, pm = FakeSubMaster(), FakePubMaster()
   runtime = TurboIntentRuntime(pm)
   sm["carState"].vEgo = 0.5
-  runtime.before_inference(sm, 10.0)
-  sm.advance(10.6)
-  runtime.before_inference(sm, 10.6)
+  warm_runtime(runtime, sm)
   send_request(runtime, sm)
   desire = runtime.before_inference(sm, 10.61)
   assert desire == log.Desire.laneChangeLeft
@@ -168,12 +174,13 @@ def test_stale_control_does_not_falsely_claim_active_maneuver_stopped():
   runtime, sm, _ = ready_runtime()
   send_request(runtime, sm)
   desire = runtime.before_inference(sm, 10.61)
-  runtime.after_inference(desire, [0, 0, 0, 0.5, 0, 0, 0, 0], 1, 10.62)
+  runtime.after_inference(desire, [0, 0, 0, 0.5, 0, 0, 0, 0], 123, 10.62)
   sm.advance(10.9)
   sm.recv_time["carControl"] = 10.6
   runtime.before_inference(sm, 10.9)
-  assert runtime.manager.status == "executing"
+  assert runtime.manager.status == "faulted"
   assert runtime.manager.reason == "vehicle_unhealthy"
+  assert runtime.manager.snapshot(10.9)["pulseMonoTime"] > 0  # Fault tracking is not an aborted pulse.
 
 
 def test_ui_stale_feedback_and_local_unknown():
@@ -195,6 +202,49 @@ def test_standstill_is_an_explicit_rejection_not_vehicle_fault():
   sm["carState"].vEgo = 0.0
   assert runtime.before_inference(sm, 10.61) == log.Desire.none
   assert pm.sent[-1][1].turboIntentState.reason == "standstill"
+
+
+def test_lost_request_reconciles_with_real_runtime_receipt_and_fences_late_delivery():
+  runtime, sm, pm = ready_runtime()
+  c = PaddleIntentController()
+  state = runtime.manager.snapshot(10.6)
+  c.update({}, [], state, 10_600_000_000, True, True, False, 10.6)
+  original = c.update({"S": True}, [{"type": "button_down", "control": "S"}], state, 10_600_000_000, True, True, False, 10.61)
+  assert original["action"] == "request"
+  # Drop the request entirely. Keep the actual runtime evaluating while the GCS waits.
+  for frame in range(21):
+    now = 10.65 + frame * .05
+    sm.advance(now)
+    runtime.before_inference(sm, now)
+    runtime.after_inference(log.Desire.none, [1, 0, 0, 0, 0, 0, 0, 0], 200 + frame, now + .001)
+  state = runtime.manager.snapshot(11.66)
+  cancel = c.update({}, [], state, 11_660_000_000, True, True, False, 11.66)
+  assert cancel["action"] == "cancel" and c.uncertain and cancel["requestId"] == original["requestId"]
+  sm[REQUEST_SERVICE].from_dict(cancel)
+  sm.updated[REQUEST_SERVICE] = True
+  assert runtime.before_inference(sm, 11.67) == log.Desire.none
+  # Round-trip the appended receipt through the real Cereal schema.
+  feedback = pm.sent[-1][1].turboIntentState.to_dict()
+  assert feedback["receipt"]["result"] == "canceled_before_consumption"
+  assert not feedback["available"]
+  assert c.update({}, [], feedback, 11_670_000_000, True, True, False, 11.68)["action"] == "none"
+  assert not c.uncertain and c.pending is None
+  sm[REQUEST_SERVICE].from_dict(original)
+  assert runtime.before_inference(sm, 11.69) == log.Desire.none
+  assert runtime.manager.pulse_time == 0
+  assert runtime.manager.receipt["result"] == "retired"
+
+
+def test_directional_lane_response_is_not_the_opposite_lane_class():
+  runtime, sm, pm = ready_runtime()
+  send_request(runtime, sm)
+  desire = runtime.before_inference(sm, 10.61)
+  runtime.after_inference(desire, [.05, 0, 0, .01, .94, 0, 0, 0], 123, 10.62)
+  feedback = pm.sent[-1][1].turboIntentState
+  assert feedback.modelResponseProbability == pytest.approx(.01)
+  assert feedback.oppositeTurnProbability == pytest.approx(.94)  # Legacy field: opposite class of current maneuver.
+  assert feedback.laneChangeProbability == pytest.approx(.95)
+  assert not feedback.responseObserved
 
 
 def test_model_run_skips_do_not_consume_desire_edge(mocker):

@@ -6,7 +6,7 @@ from openpilot.cereal import log
 from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
-from openpilot.selfdrive.ui.turbo_intent import IntentBorder, LANE_CHANGE_COLOR, TAKEOVER_COLOR, intent_border, draw_intent_border, split_border_segment
+from openpilot.selfdrive.ui.turbo_intent import IntentBorder, TAKEOVER_COLOR, intent_color, intent_border, draw_intent_border, split_border_segment
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
@@ -268,7 +268,7 @@ class AugmentedRoadView(CameraView):
     points = points[:2] / points[2:3]
     return [(float(x), float(y)) for x, y in points.T]
 
-  def _draw_model_crop_poly(self, points: list[tuple[float, float]], color: rl.Color, side: str = "none") -> None:
+  def _draw_model_crop_poly(self, points: list[tuple[float, float]], color: rl.Color, side: str = "none", dim: bool = False) -> None:
     screen_points = [self.camera_point_to_screen(x, y) for x, y in points]
     if any(point is None for point in screen_points):
       return
@@ -281,7 +281,7 @@ class AugmentedRoadView(CameraView):
     def draw_segment(start, end):
       for a, b, highlight in split_border_segment(start, end, center_x, side):
         rl.draw_line_ex(rl.Vector2(float(a[0]), float(a[1])), rl.Vector2(float(b[0]), float(b[1])),
-                        MODEL_CROP_LINE_THICKNESS, rl.Color(*LANE_CHANGE_COLOR) if highlight else color)
+                        MODEL_CROP_LINE_THICKNESS, rl.Color(*intent_color(IntentBorder(dim=dim))) if highlight else color)
 
     edge_lengths = [float(np.linalg.norm(pts[(i + 1) % len(pts)] - pts[i])) for i in range(len(pts))]
     if not edge_lengths:
@@ -333,7 +333,7 @@ class AugmentedRoadView(CameraView):
     for intrinsics, bigmodel_frame in overlays:
       points = self._model_crop_source_points(intrinsics, bigmodel_frame)
       if points is not None:
-        self._draw_model_crop_poly(points, crop_color, visual.side)
+        self._draw_model_crop_poly(points, crop_color, visual.side, visual.dim)
 
 
 if __name__ == "__main__":

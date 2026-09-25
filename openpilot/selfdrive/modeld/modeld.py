@@ -210,7 +210,8 @@ def main(demo=False):
     subscriptions.extend(INTENT_SUBSCRIPTIONS)
   pm = PubMaster(publications)
   sm = SubMaster(subscriptions)
-  turbo_intent = TurboIntentRuntime(pm) if CP.brand == "turbo" else None
+  turbo_intent = (TurboIntentRuntime(pm, history_evaluations=model.frame_skip * model.input_shapes['desire_pulse'][1])
+                  if CP.brand == "turbo" else None)
 
   # TODO this needs more thought, use .2s extra for now to estimate other delays
   # TODO Move smooth seconds to action function
@@ -322,7 +323,7 @@ def main(demo=False):
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       if turbo_intent is not None:
-        turbo_intent.after_inference(desire, desire_state, meta_main.frame_id, time.monotonic())
+        turbo_intent.after_inference(desire, desire_state, meta_main.frame_id, time.monotonic(), model_valid=modelv2_send.valid)
         modelv2_send.modelV2.meta.laneChangeState = turbo_intent.manager.lane_change_state
         modelv2_send.modelV2.meta.laneChangeDirection = turbo_intent.manager.lane_change_direction
       else:
