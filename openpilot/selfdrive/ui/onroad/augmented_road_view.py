@@ -1,11 +1,12 @@
 import os
+import time
 import numpy as np
 import pyray as rl
 from openpilot.cereal import log
 from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
-from openpilot.selfdrive.ui.turbo_intent import draw_intent_status
+from openpilot.selfdrive.ui.turbo_intent import IntentBorder, LANE_CHANGE_COLOR, TAKEOVER_COLOR, intent_border, draw_intent_border, split_border_segment
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.onroad.driver_state import DriverStateRenderer
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer
@@ -106,8 +107,6 @@ class AugmentedRoadView(CameraView):
     # Draw all UI overlays
     self.model_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
-    if self._show_turbo_steer_override:
-      draw_intent_status(ui_state.sm, self._content_rect)
     self.alert_renderer.render(self._content_rect)
     self.driver_state_renderer.render(self._content_rect)
 
@@ -133,15 +132,25 @@ class AugmentedRoadView(CameraView):
   def _draw_border(self, rect: rl.Rectangle):
     rl.draw_rectangle_lines_ex(rect, UI_BORDER_SIZE, rl.BLACK)
     border_roundness = 0.12
-    turbo_steer_override_active = self._show_turbo_steer_override and ui_state.turbo_steer_override_active
-    border_color = (
-      TURBO_STEER_OVERRIDE_COLOR
-      if turbo_steer_override_active
-      else BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
-    )
+    border_color, visual = self._border_style()
     border_rect = rl.Rectangle(rect.x + UI_BORDER_SIZE, rect.y + UI_BORDER_SIZE,
                                rect.width - 2 * UI_BORDER_SIZE, rect.height - 2 * UI_BORDER_SIZE)
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)
+    draw_intent_border(border_rect, visual, UI_BORDER_SIZE, border_roundness)
+
+  def _border_style(self):
+    color = BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
+    if not self._show_turbo_steer_override:
+      return color, IntentBorder()
+    alert = self.alert_renderer.get_alert(ui_state.sm)
+    override = ui_state.turbo_steer_override_active or bool(alert and alert.status == log.SelfdriveState.AlertStatus.userPrompt)
+    visual = intent_border(ui_state.sm, time.monotonic(), engaged=ui_state.engaged, override=override,
+                           critical=bool(alert and alert.status == log.SelfdriveState.AlertStatus.critical))
+    if visual.takeover:
+      color = rl.Color(*TAKEOVER_COLOR)
+    elif override:
+      color = TURBO_STEER_OVERRIDE_COLOR
+    return color, visual
 
   def _switch_stream_if_needed(self, sm):
     if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
@@ -259,12 +268,21 @@ class AugmentedRoadView(CameraView):
     points = points[:2] / points[2:3]
     return [(float(x), float(y)) for x, y in points.T]
 
-  def _draw_model_crop_poly(self, points: list[tuple[float, float]], color: rl.Color) -> None:
+  def _draw_model_crop_poly(self, points: list[tuple[float, float]], color: rl.Color, side: str = "none") -> None:
     screen_points = [self.camera_point_to_screen(x, y) for x, y in points]
     if any(point is None for point in screen_points):
       return
 
     pts = [np.array(point, dtype=np.float32) for point in screen_points if point is not None]
+    if not pts:
+      return
+    center_x = (min(p[0] for p in pts) + max(p[0] for p in pts)) / 2
+
+    def draw_segment(start, end):
+      for a, b, highlight in split_border_segment(start, end, center_x, side):
+        rl.draw_line_ex(rl.Vector2(float(a[0]), float(a[1])), rl.Vector2(float(b[0]), float(b[1])),
+                        MODEL_CROP_LINE_THICKNESS, rl.Color(*LANE_CHANGE_COLOR) if highlight else color)
+
     edge_lengths = [float(np.linalg.norm(pts[(i + 1) % len(pts)] - pts[i])) for i in range(len(pts))]
     if not edge_lengths:
       return
@@ -288,9 +306,7 @@ class AugmentedRoadView(CameraView):
     for i in range(len(pts)):
       start = corner_ends[i]
       end = corner_starts[(i + 1) % len(pts)]
-      rl.draw_line_ex(rl.Vector2(float(start[0]), float(start[1])),
-                      rl.Vector2(float(end[0]), float(end[1])),
-                      MODEL_CROP_LINE_THICKNESS, color)
+      draw_segment(start, end)
 
       control = pts[(i + 1) % len(pts)]
       arc_start = corner_starts[(i + 1) % len(pts)]
@@ -299,9 +315,7 @@ class AugmentedRoadView(CameraView):
       for segment in range(1, MODEL_CROP_CORNER_SEGMENTS + 1):
         t = segment / MODEL_CROP_CORNER_SEGMENTS
         point = (1.0 - t) ** 2 * arc_start + 2.0 * (1.0 - t) * t * control + t ** 2 * arc_end
-        rl.draw_line_ex(rl.Vector2(float(last[0]), float(last[1])),
-                        rl.Vector2(float(point[0]), float(point[1])),
-                        MODEL_CROP_LINE_THICKNESS, color)
+        draw_segment(last, point)
         last = point
 
   def _draw_model_crop_overlay(self) -> None:
@@ -309,7 +323,7 @@ class AugmentedRoadView(CameraView):
       return
 
     device_camera = self.device_camera or DEFAULT_DEVICE_CAMERA
-    crop_color = BORDER_COLORS.get(ui_state.status, BORDER_COLORS[UIStatus.DISENGAGED])
+    crop_color, visual = self._border_style()
     overlays: list[tuple[np.ndarray, bool]] = []
     if self.stream_type == ROAD_CAM:
       overlays.append((device_camera.fcam.intrinsics, False))
@@ -319,7 +333,7 @@ class AugmentedRoadView(CameraView):
     for intrinsics, bigmodel_frame in overlays:
       points = self._model_crop_source_points(intrinsics, bigmodel_frame)
       if points is not None:
-        self._draw_model_crop_poly(points, crop_color)
+        self._draw_model_crop_poly(points, crop_color, visual.side)
 
 
 if __name__ == "__main__":

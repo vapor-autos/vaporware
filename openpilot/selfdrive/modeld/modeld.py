@@ -322,7 +322,7 @@ def main(demo=False):
       r_lane_change_prob = desire_state[log.Desire.laneChangeRight]
       lane_change_prob = l_lane_change_prob + r_lane_change_prob
       if turbo_intent is not None:
-        turbo_intent.after_inference(desire, lane_change_prob, meta_main.frame_id, time.monotonic())
+        turbo_intent.after_inference(desire, desire_state, meta_main.frame_id, time.monotonic())
         modelv2_send.modelV2.meta.laneChangeState = turbo_intent.manager.lane_change_state
         modelv2_send.modelV2.meta.laneChangeDirection = turbo_intent.manager.lane_change_direction
       else:

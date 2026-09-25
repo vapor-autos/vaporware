@@ -1,6 +1,7 @@
-import time
+import math
+from dataclasses import dataclass
 
-from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE, FEEDBACK_TIMEOUT_S
+from openpilot.selfdrive.controls.lib.turbo_intent import PROTOCOL_VERSION, REQUEST_SERVICE, STATE_SERVICE, FEEDBACK_TIMEOUT_S
 
 
 _STATUS_TEXT = {
@@ -10,6 +11,7 @@ _STATUS_TEXT = {
   "unknown": "STATUS UNKNOWN", "timedOut": "TAKE OVER", "noModelResponse": "TAKE OVER",
   "operator_not_ready": "NOT READY", "feedback_unavailable": "LINK STALE", "busy_or_unknown": "BUSY",
   "ambiguous_paddles": "RELEASE BOTH PADDLES", "cancel_or_engage": "ENGAGE / CANCEL INPUT",
+  "ambiguous_maneuvers": "RELEASE MANEUVER BUTTONS",
 }
 _REASON_TEXT = {
   "standstill": "STOPPED", "not_engaged": "NOT ENGAGED", "vehicle_unhealthy": "CHECK VEHICLE",
@@ -18,12 +20,15 @@ _REASON_TEXT = {
   "motion_not_stable": "SPEED NOT STABLE", "stale_context": "REQUEST TOO OLD", "disabled": "OFF",
   "already_started_use_l2": "USE L2 TO DISENGAGE", "operator_cancel": "", "would_execute": "",
   "model_reports_complete": "", "takeover_required": "", "engagement_or_session_reset": "SESSION RESET",
+  "model_turn_response_cleared": "MODEL RESPONSE CLEARED",
 }
 
 
 def _reason_text(state) -> str:
   reason = str(state.reason)
   if reason == "speed_out_of_range":
+    if state.maxSpeed == 0:
+      return f"SPEED >= {state.minSpeed:g} M/S REQUIRED" if state.minSpeed > 0 else "VALID FORWARD SPEED REQUIRED"
     return f"SPEED {state.minSpeed:g}-{state.maxSpeed:g} M/S REQUIRED"
   return _REASON_TEXT.get(reason, reason.replace("_", " ").upper())
 
@@ -32,17 +37,22 @@ def _idle_label(state) -> str:
   mode = "SHADOW" if state.mode == "shadow" else "OFF" if state.mode == "off" else "READY" if state.available else "WAITING"
   # A terminal reason describes an old request, not necessarily the current gate.
   reason = _reason_text(state) if state.status == "idle" and not state.available else ""
-  return f"PADDLES: {mode}" + (f" | {reason}" if reason and reason != mode else "")
+  uncapped = " | NO SPEED CAP" if state.mode == "execute" and state.maxSpeed == 0 else ""
+  return f"PADDLES: {mode}{uncapped}" + (f" | {reason}" if reason and reason != mode else "")
 
 
 def intent_label(sm, now: float) -> str:
+  """Human-readable diagnostics; on-screen intent feedback uses borders only."""
   if STATE_SERVICE not in sm.seen or not sm.seen[STATE_SERVICE]:
     return ""
   if not sm.valid[STATE_SERVICE] or not 0 <= now - sm.recv_time[STATE_SERVICE] <= FEEDBACK_TIMEOUT_S:
     return "LANE CHANGE: LINK STALE"
   state = sm[STATE_SERVICE]
+  if state.protocolVersion != PROTOCOL_VERSION:
+    return "INTENT: PROTOCOL MISMATCH"
   direction = str(state.direction).upper() if str(state.direction) in ("left", "right") else ""
-  prefix = f"{direction} LANE CHANGE".strip()
+  kind = "TURN" if str(state.maneuver) == "turn" else "LANE CHANGE"
+  prefix = f"{direction} {kind}".strip()
   status = str(state.status)
   if status in ("executing", "timedOut", "noModelResponse"):
     suffix = "WHEEL OVERRIDE" if state.operatorOverride and status == "executing" else _reason_text(state)
@@ -53,10 +63,12 @@ def intent_label(sm, now: float) -> str:
     local = sm[REQUEST_SERVICE]
     local_status = str(local.localStatus)
     acknowledged = (state.requestId > 0 and state.requestId == local.requestId and
-                    state.operatorId == local.operatorId and status != "idle")
+                    state.operatorId == local.operatorId and state.maneuver == local.maneuver and
+                    state.direction == local.direction and status != "idle")
     if (local_status not in ("", "idle", "completed", "shadow", "rejected", "awaitingEvaluation", "executing") and
         not (local_status == "pending" and acknowledged)):
-      return "LANE CHANGE: " + _STATUS_TEXT.get(local_status, local_status.replace("_", " ").upper())
+      local_kind = "TURN" if str(local.maneuver) == "turn" else "LANE CHANGE"
+      return local_kind + ": " + _STATUS_TEXT.get(local_status, local_status.replace("_", " ").upper())
     if status != "awaitingEvaluation" and (local_status == "idle" or (local.operatorId and local.operatorId != state.operatorId)):
       return _idle_label(state)
   if status == "idle":
@@ -65,26 +77,67 @@ def intent_label(sm, now: float) -> str:
   return f"{prefix}: {_STATUS_TEXT.get(status, status.upper())}" + (f" | {reason}" if reason else "")
 
 
-def intent_panel_geometry(rect) -> tuple[float, float, float, float, int]:
-  # Fixed footprint: changing status text must not resize/recenter the badge.
-  size = int(max(16, min(28, rect.width / 50)))
-  width = max(0, min(rect.width - 32, max(340, rect.width * 0.45)))
-  height = size * 1.25 + 20
-  return rect.x + (rect.width - width) / 2, rect.y + rect.height * 0.86 - height / 2, width, height, size
+LANE_CHANGE_COLOR = (0xAD, 0x66, 0xFF, 0xFF)  # Violet; distinct from engagement/override/alerts.
+TAKEOVER_COLOR = (0xC9, 0x22, 0x31, 0xFF)
 
 
-def draw_intent_status(sm, rect):
-  # Imported only by the UI; label logic remains usable in hardware-free tests.
+@dataclass(frozen=True)
+class IntentBorder:
+  side: str = "none"
+  takeover: bool = False
+
+
+def intent_border(sm, now: float, *, engaged: bool, override: bool = False, critical: bool = False) -> IntentBorder:
+  if critical:
+    return IntentBorder(takeover=True)
+  if not engaged or not sm.seen.get(STATE_SERVICE, False):
+    return IntentBorder()
+  state = sm[STATE_SERVICE]
+  if state.protocolVersion != PROTOCOL_VERSION:
+    return IntentBorder(takeover=str(state.status) in ("executing", "timedOut", "noModelResponse"))
+  if state.mode != "execute":
+    return IntentBorder()
+  fresh = sm.valid[STATE_SERVICE] and 0 <= now - sm.recv_time[STATE_SERVICE] <= FEEDBACK_TIMEOUT_S
+  active = str(state.status) in ("executing", "timedOut", "noModelResponse")
+  # Losing authoritative feedback during a maneuver must not look like completion.
+  if active and (not fresh or str(state.status) in ("timedOut", "noModelResponse")):
+    return IntentBorder(takeover=True)
+  if not fresh or override or state.operatorOverride or state.status != "executing":
+    return IntentBorder()
+  side = str(state.direction)
+  return IntentBorder(side=side if side in ("left", "right") else "none")
+
+
+def half_border_clip(rect, side: str, thickness: float) -> tuple[int, int, int, int]:
+  # Include the stroke outside the rounded rectangle, split at its center.
+  left, right = math.floor(rect.x - thickness), math.ceil(rect.x + rect.width + thickness)
+  top, bottom = math.floor(rect.y - thickness), math.ceil(rect.y + rect.height + thickness)
+  center = math.floor(rect.x + rect.width / 2)
+  return (left, top, center - left, bottom - top) if side == "left" else (center, top, right - center, bottom - top)
+
+
+def draw_intent_border(rect, visual: IntentBorder, thickness: float, roundness: float = 0.12):
+  """Overlay the existing outline; call outside any other scissor region."""
   import pyray as rl
-  from openpilot.system.ui.lib.application import FontWeight
-  from openpilot.system.ui.widgets.label import gui_label
+  if visual.takeover:
+    rl.draw_rectangle_rounded_lines_ex(rect, roundness, 10, thickness, rl.Color(*TAKEOVER_COLOR))
+    return
+  if visual.side not in ("left", "right"):
+    return
+  rl.begin_scissor_mode(*half_border_clip(rect, visual.side, thickness))
+  try:
+    # Clip a complete outline, not a half-width rectangle: no divider through video.
+    rl.draw_rectangle_rounded_lines_ex(rect, roundness, 10, thickness, rl.Color(*LANE_CHANGE_COLOR))
+  finally:
+    rl.end_scissor_mode()
 
-  label = intent_label(sm, time.monotonic())
-  if not label:
-    return
-  x, y, width, height, size = intent_panel_geometry(rect)
-  if width <= 24:
-    return
-  rl.draw_rectangle_rounded(rl.Rectangle(x, y, width, height), 0.2, 6, rl.Color(0, 0, 0, 190))
-  gui_label(rl.Rectangle(x + 12, y, width - 24, height), label, font_size=size, font_weight=FontWeight.MEDIUM,
-            alignment=rl.GuiTextAlignment.TEXT_ALIGN_CENTER)
+
+def split_border_segment(start, end, center_x: float, side: str):
+  """Split projected box edges without disturbing the camera's scissor region."""
+  if side not in ("left", "right"):
+    return [(start, end, False)]
+  points = [start, end]
+  if (start[0] < center_x < end[0]) or (end[0] < center_x < start[0]):
+    t = (center_x - start[0]) / (end[0] - start[0])
+    points.insert(1, (center_x, start[1] + t * (end[1] - start[1])))
+  return [(a, b, ((a[0] + b[0]) / 2 < center_x) == (side == "left")) for a, b in zip(points, points[1:], strict=False)]

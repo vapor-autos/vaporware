@@ -5,6 +5,11 @@ from dataclasses import dataclass
 
 from openpilot.selfdrive.controls.lib.turbo_intent import BUSY_STATUSES, CONTEXT_TIMEOUT_S, FEEDBACK_TIMEOUT_S, PROTOCOL_VERSION, STATE_SERVICE
 
+MANEUVER_BUTTONS = {
+  "left_paddle": ("laneChange", "left"), "right_paddle": ("laneChange", "right"),
+  "S": ("turn", "left"), "O": ("turn", "right"),
+}
+
 
 @dataclass(frozen=True)
 class IntentFeedback:
@@ -31,7 +36,7 @@ def read_intent_feedback(sm, now: float | None = None) -> IntentFeedback:
                         fresh, applied_fresh, bool(sm[applied_service].applied), age, applied_age)
 
 
-class PaddleIntentController:
+class ManeuverIntentController:
   def __init__(self):
     self.operator_id = uuid.uuid4().hex
     self.sequence = 0
@@ -46,9 +51,9 @@ class PaddleIntentController:
 
   def update(self, buttons: dict, events: list[dict], feedback: dict, feedback_time: int,
              fresh: bool, ready: bool, reverse: bool, now: float) -> dict:
-    left, right = bool(buttons.get("left_paddle")), bool(buttons.get("right_paddle"))
+    held = [name for name in MANEUVER_BUTTONS if buttons.get(name)]
     downs = [e.get("control") for e in events if e.get("type") == "button_down"]
-    paddle_downs = [b for b in downs if b in ("left_paddle", "right_paddle")]
+    maneuver_downs = [b for b in downs if b in MANEUVER_BUTTONS]
     context = (feedback.get("sessionId", ""), feedback.get("epoch", "")) if fresh else self.context
     changed = fresh and all(context) and context != self.context
     if changed:
@@ -57,15 +62,17 @@ class PaddleIntentController:
       self.last_request = {}
       self.last_status = "idle"
     can_press = self.released and not changed and fresh
-    if not fresh or left or right or paddle_downs:
+    if not fresh or held or maneuver_downs:
       self.released = False
-    elif not left and not right:
+    else:
       self.released = True
 
     wire = None
     if self.pending is not None:
       ack = (fresh and feedback.get("requestId") == self.pending["requestId"] and
-             feedback.get("operatorId") == self.operator_id and feedback.get("status") != "idle")
+             feedback.get("operatorId") == self.operator_id and feedback.get("status") != "idle" and
+             feedback.get("protocolVersion") == PROTOCOL_VERSION and
+             feedback.get("maneuver") == self.pending["maneuver"] and feedback.get("direction") == self.pending["direction"])
       invalidate = "L2" in downs or bool(buttons.get("L2")) or not ready or reverse or not fresh
       if invalidate:
         if self.pending["action"] != "cancel":
@@ -90,12 +97,12 @@ class PaddleIntentController:
         wire = self.pending
 
     busy = self.pending is not None or (fresh and feedback.get("status") in BUSY_STATUSES)
-    if paddle_downs and can_press:
+    if maneuver_downs and can_press:
       reason = ""
-      if "L2" in downs or bool(buttons.get("L2")) or "L3" in downs:
+      if "L2" in downs or bool(buttons.get("L2")) or "L3" in downs or bool(buttons.get("L3")):
         reason = "cancel_or_engage"
-      elif len(paddle_downs) != 1 or (left and right):
-        reason = "ambiguous_paddles"
+      elif len(maneuver_downs) != 1 or len(set(held + maneuver_downs)) != 1:
+        reason = "ambiguous_maneuvers"
       elif busy or self.uncertain:
         reason = "busy_or_unknown"
       elif not fresh or feedback.get("protocolVersion") != PROTOCOL_VERSION or not all(context):
@@ -107,10 +114,11 @@ class PaddleIntentController:
       else:
         self.sequence += 1
         self.pending_since = now
+        maneuver, direction = MANEUVER_BUTTONS[maneuver_downs[0]]
         self.pending = {
           "protocolVersion": PROTOCOL_VERSION, "operatorId": self.operator_id, "requestId": self.sequence,
           "sessionId": context[0], "epoch": context[1], "action": "request",
-          "direction": "left" if paddle_downs[0] == "left_paddle" else "right",
+          "direction": direction, "maneuver": maneuver,
           "baseFeedbackLogMonoTime": feedback_time, "ready": ready, "reverse": reverse,
           "createdMonoTime": int(now * 1e9),
         }
@@ -119,6 +127,8 @@ class PaddleIntentController:
         self.last_status, self.status_since = "pending", now
 
     if (fresh and self.uncertain and feedback.get("operatorId") == self.operator_id and feedback.get("requestId") == self.sequence and
+        feedback.get("protocolVersion") == PROTOCOL_VERSION and feedback.get("maneuver") == self.last_request.get("maneuver") and
+        feedback.get("direction") == self.last_request.get("direction") and
         feedback.get("status") not in (None, "idle")):
       self.last_status, self.status_since = feedback.get("status", "unknown"), now
       self.uncertain = False
@@ -127,3 +137,19 @@ class PaddleIntentController:
     # Retain identity for UI correlation even after the action is acknowledged.
     return {**(wire or {**self.last_request, "operatorId": self.operator_id, "action": "none"}),
             "localStatus": "unknown" if self.uncertain else self.last_status}
+
+
+# Compatibility for existing callers; both names use the same shared transaction slot.
+PaddleIntentController = ManeuverIntentController
+
+
+class IntentPublishSchedule:
+  """Send edges immediately; retry/refresh at the existing 10 Hz cadence."""
+  def __init__(self):
+    self.signature = None
+
+  def update(self, request: dict, heartbeat: bool) -> bool:
+    signature = tuple(request.get(k) for k in ("operatorId", "requestId", "sessionId", "epoch", "action", "maneuver", "direction"))
+    publish = heartbeat or signature != self.signature
+    self.signature = signature
+    return publish

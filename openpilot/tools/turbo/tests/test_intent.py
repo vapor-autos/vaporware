@@ -1,12 +1,13 @@
 import pytest
 
 from openpilot.cereal import messaging
-from openpilot.selfdrive.controls.lib.turbo_intent import STATE_SERVICE
+from openpilot.selfdrive.controls.lib.turbo_intent import PROTOCOL_VERSION, STATE_SERVICE
 from openpilot.tools.turbo.g29_compat import TurboG29
-from openpilot.tools.turbo.intent import PaddleIntentController, read_intent_feedback
+from openpilot.tools.turbo.intent import MANEUVER_BUTTONS, IntentPublishSchedule, PaddleIntentController, read_intent_feedback
 
 
-FEEDBACK = {"protocolVersion": 1, "sessionId": "session", "epoch": "epoch", "status": "idle"}
+FEEDBACK = {"protocolVersion": PROTOCOL_VERSION, "sessionId": "session", "epoch": "epoch", "status": "idle",
+            "maneuver": "laneChange", "direction": "left"}
 
 
 def step(c, buttons=None, downs=(), feedback=None, fresh=True, ready=True, reverse=False, now=10.0):
@@ -29,7 +30,7 @@ def test_single_press_and_held_button_are_one_transaction(paddle, direction):
     repeated = step(c, {paddle: True}, now=t)
     assert repeated["requestId"] == first["requestId"]
     assert repeated["baseFeedbackLogMonoTime"] == first["baseFeedbackLogMonoTime"]
-  ack = {**FEEDBACK, "operatorId": c.operator_id, "requestId": 1, "status": "shadow"}
+  ack = {**FEEDBACK, "direction": direction, "operatorId": c.operator_id, "requestId": 1, "status": "shadow"}
   assert step(c, {paddle: True}, feedback=ack, now=10.21)["action"] == "none"
   assert step(c, {paddle: True}, [paddle], feedback=ack, now=10.22)["action"] == "none"
   step(c, feedback=ack, now=10.23)
@@ -37,8 +38,8 @@ def test_single_press_and_held_button_are_one_transaction(paddle, direction):
 
 
 @pytest.mark.parametrize("buttons,downs,reason", [
-  ({"left_paddle": True, "right_paddle": True}, ["left_paddle", "right_paddle"], "ambiguous_paddles"),
-  ({}, ["left_paddle", "right_paddle"], "ambiguous_paddles"),
+  ({"left_paddle": True, "right_paddle": True}, ["left_paddle", "right_paddle"], "ambiguous_maneuvers"),
+  ({}, ["left_paddle", "right_paddle"], "ambiguous_maneuvers"),
   ({"left_paddle": True, "L2": True}, ["left_paddle", "L2"], "cancel_or_engage"),
   ({"left_paddle": True, "L2": True}, ["left_paddle"], "cancel_or_engage"),
   ({"left_paddle": True}, ["left_paddle", "L3"], "cancel_or_engage"),
@@ -177,6 +178,7 @@ def test_50hz_reader_10hz_publisher_preserves_request_at_every_phase(mocker, pre
       sm[STATE_SERVICE].operatorId = c.operator_id
       sm[STATE_SERVICE].requestId = 1
       sm[STATE_SERVICE].status = "shadow"
+      sm[STATE_SERVICE].direction = "left" if paddle == "left_paddle" else "right"
     clock.return_value = loop_start + 0.0003
     context = read_intent_feedback(sm)
     assert context.fresh and context.applied_fresh
@@ -208,7 +210,7 @@ def test_actual_feedback_loss_cancels_pending_without_forgetting_unknown():
   assert step(c, now=10.4)["localStatus"] == "unknown"
   assert step(c, {"right_paddle": True}, ["right_paddle"], now=10.42)["action"] == "none"
   assert c.uncertain and c.sequence == 1
-  late_ack = {**FEEDBACK, "operatorId": c.operator_id, "requestId": 1, "status": "rejected"}
+  late_ack = {**FEEDBACK, "direction": "right", "operatorId": c.operator_id, "requestId": 1, "status": "rejected"}
   assert step(c, feedback=late_ack, now=10.5)["localStatus"] == "rejected"
 
 
@@ -230,3 +232,92 @@ def test_acknowledged_identity_survives_for_ui_without_retransmitting_action():
   assert wire["action"] == "none" and wire["localStatus"] == "shadow"
   assert wire["requestId"] == r["requestId"] and wire["operatorId"] == r["operatorId"]
   assert step(c, feedback=ack, now=12.2)["localStatus"] == "idle"
+
+
+@pytest.mark.parametrize("button", MANEUVER_BUTTONS)
+def test_all_maneuver_buttons_share_single_press_and_busy_semantics(button):
+  c = controller()
+  kind, direction = MANEUVER_BUTTONS[button]
+  r = step(c, {button: True}, [button])
+  assert (r["maneuver"], r["direction"]) == (kind, direction)
+  ack = {**FEEDBACK, **r, "status": "executing"}
+  assert step(c, {button: True}, feedback=ack, now=10.01)["action"] == "none"
+  step(c, feedback=ack, now=10.02)
+  for other in MANEUVER_BUTTONS:
+    assert step(c, {other: True}, [other], feedback=ack, now=10.03)["action"] == "none"
+    step(c, feedback=ack, now=10.04)
+  assert c.sequence == 1
+
+
+@pytest.mark.parametrize("first", MANEUVER_BUTTONS)
+@pytest.mark.parametrize("second", MANEUVER_BUTTONS)
+def test_mixed_maneuver_batch_never_chooses_by_iteration_order(first, second):
+  c = controller()
+  result = step(c, {first: True, second: True}, [first, second])
+  assert result["action"] == "none" and result["localStatus"] == "ambiguous_maneuvers"
+
+
+@pytest.mark.parametrize("button", ["S", "O"])
+def test_face_button_held_across_reconnect_never_starts(button):
+  c = PaddleIntentController()
+  assert step(c, {button: True}, [button])["action"] == "none"
+  assert step(c, {button: True})["action"] == "none"
+  step(c)
+  assert step(c, {button: True}, [button])["maneuver"] == "turn"
+  assert step(c, {button: True}, [button], feedback={**FEEDBACK, "epoch": "new"})["action"] == "none"
+
+
+@pytest.mark.parametrize("button", ["S", "O"])
+@pytest.mark.parametrize("control", ["L2", "L3"])
+def test_engage_cancel_wins_over_face_buttons_even_when_already_held(button, control):
+  c = controller()
+  assert step(c, {button: True, control: True}, [button])["localStatus"] == "cancel_or_engage"
+
+
+def test_wrong_kind_ack_cannot_hide_pending_turn():
+  c = controller()
+  r = step(c, {"S": True}, ["S"])
+  ack = {**FEEDBACK, **r, "status": "executing", "maneuver": "laneChange"}
+  assert step(c, feedback=ack, now=10.1)["action"] == "request"
+  assert step(c, feedback=ack, now=10.4)["localStatus"] == "unknown"
+  assert step(c, feedback=ack, now=10.42)["localStatus"] == "unknown"
+
+
+@pytest.mark.parametrize("mask", range(256))
+def test_all_face_button_and_hat_combinations(mask):
+  wheel = TurboG29.__new__(TurboG29)
+  state = {"buttons": {"L2": 1}}
+  wheel.apply_gamepad(state, mask)
+  for bit, name in enumerate(("X", "S", "O", "T"), 4):
+    assert state["buttons"][name] == bool(mask & (1 << bit))
+  hat = mask & 0xf
+  expected = {0: {"up"}, 1: {"up", "right"}, 2: {"right"}, 3: {"right", "down"},
+              4: {"down"}, 5: {"down", "left"}, 6: {"left"}, 7: {"left", "up"}}.get(hat, set())
+  assert {k for k in ("up", "down", "left", "right") if state["buttons"][k]} == expected
+  assert state["buttons"]["L2"] == 1
+  wheel.apply_gamepad(state, 8)
+  assert not any(state["buttons"][k] for k in ("X", "S", "O", "T", "up", "down", "left", "right"))
+
+
+def test_face_combinations_do_not_retrigger_the_remaining_held_button():
+  wheel = TurboG29.__new__(TurboG29)
+  previous, downs = {}, []
+  state = {"buttons": {}}
+  for mask in (8, 0x28, 0x68, 0x48, 0x40, 0x48, 8):
+    wheel.apply_gamepad(state, mask)
+    downs.append([k for k, v in state["buttons"].items() if v and not previous.get(k)])
+    previous = state["buttons"].copy()
+  assert downs == [[], ["S"], ["O"], [], ["up"], [], []]
+
+
+@pytest.mark.parametrize("phase", range(5))
+def test_new_request_and_cancel_publish_without_waiting_for_heartbeat(phase):
+  schedule = IntentPublishSchedule()
+  idle = {"action": "none", "operatorId": "gcs"}
+  schedule.update(idle, True)
+  request = {**idle, "requestId": 1, "action": "request", "maneuver": "turn", "direction": "left"}
+  assert schedule.update(request, phase == 0)
+  assert not schedule.update(request, False)
+  assert schedule.update(request, True)
+  assert schedule.update({**request, "action": "cancel"}, False)
+  assert not schedule.update({**request, "action": "cancel"}, False)

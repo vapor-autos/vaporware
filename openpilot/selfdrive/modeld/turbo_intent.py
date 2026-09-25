@@ -1,4 +1,6 @@
 import os
+import math
+from collections.abc import Sequence
 
 from openpilot.cereal import log, messaging
 from openpilot.selfdrive.controls.lib.turbo_intent import (
@@ -48,13 +50,23 @@ class TurboIntentRuntime:
     self.publish(now)
     return self.manager.desire
 
-  def after_inference(self, desire, probability: float, frame_id: int, now: float):
-    self.manager.evaluated(desire, probability, frame_id, now)
+  def after_inference(self, desire, desire_state: Sequence[float], frame_id: int, now: float):
+    def probability(index):
+      return float(desire_state[index]) if len(desire_state) > index else math.nan
+
+    lane_change_probability = probability(log.Desire.laneChangeLeft) + probability(log.Desire.laneChangeRight)
+    response, opposite = lane_change_probability, 0.0
+    if self.manager.request.get("maneuver") == "turn":
+      left = self.manager.request.get("direction") == "left"
+      response = probability(log.Desire.turnLeft if left else log.Desire.turnRight)
+      opposite = probability(log.Desire.turnRight if left else log.Desire.turnLeft)
+    self.manager.evaluated(desire, response, frame_id, now,
+                           opposite_probability=opposite, lane_change_probability=lane_change_probability)
     self.publish(now)
 
   def publish(self, now: float):
     state = self.manager.snapshot(now)
-    signature = (state["epoch"], state["requestId"], state["status"], state["reason"])
+    signature = (state["epoch"], state["operatorId"], state["requestId"], state["maneuver"], state["status"], state["reason"])
     if now - self.last_publish >= 0.1 or signature != self.last_signature:
       msg = messaging.new_message(STATE_SERVICE, valid=True)
       msg.turboIntentState = state

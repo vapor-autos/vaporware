@@ -1,10 +1,11 @@
 import numpy as np
+import time
 import pyray as rl
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
-from openpilot.selfdrive.ui.turbo_intent import draw_intent_status
+from openpilot.selfdrive.ui.turbo_intent import STATE_SERVICE, intent_border, draw_intent_border
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.mici.onroad.driver_state import DriverStateRenderer
@@ -228,7 +229,6 @@ class AugmentedRoadView(CameraView):
     self._driver_state_renderer.render()
 
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)
-    draw_intent_status(ui_state.sm, self._content_rect)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
     self._alert_renderer.render(self._content_rect)
@@ -239,6 +239,14 @@ class AugmentedRoadView(CameraView):
 
     # End clipping region
     rl.end_scissor_mode()
+
+    if ui_state.sm.seen.get(STATE_SERVICE, False):
+      visual = intent_border(ui_state.sm, time.monotonic(), engaged=ui_state.engaged,
+                             override=ui_state.turbo_steer_override_active or alert_to_render is not None,
+                             critical=bool(alert_to_render and alert_to_render.status == log.SelfdriveState.AlertStatus.critical))
+      outline = rl.Rectangle(self._content_rect.x + 8, self._content_rect.y + 8,
+                             self._content_rect.width - 16, self._content_rect.height - 16)
+      draw_intent_border(outline, visual, 8)
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds

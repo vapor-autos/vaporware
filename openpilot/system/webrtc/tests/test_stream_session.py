@@ -325,15 +325,16 @@ class TestStreamSession:
     assert forwarded.turboSteerAssist.requestedSteeringAngleDeg == 12.5
 
   @pytest.mark.parametrize("session,valid,protocol,action,accepted", [
-    ("session", True, 1, "request", True), ("session", True, 1, "cancel", True),
-    ("old-session", True, 1, "request", False), ("session", False, 1, "request", False),
-    ("session", True, 2, "request", False), ("session", True, 1, "none", False),
+    ("session", True, 2, "request", True), ("session", True, 2, "cancel", True),
+    ("old-session", True, 2, "request", False), ("session", False, 2, "request", False),
+    ("session", True, 1, "request", False), ("session", True, 2, "none", False),
   ])
   def test_intent_is_bound_to_real_bridge_session(self, mocker, session, valid, protocol, action, accepted):
     pm = mocker.Mock()
     proxy = CerealIncomingMessageProxy(pm, session_id="session")
     proxy.send(json.dumps({"type": "turboIntentRequest", "valid": valid, "logMonoTime": 123,
-                           "data": {"sessionId": session, "protocolVersion": protocol, "action": action}}).encode())
+                           "data": {"sessionId": session, "protocolVersion": protocol, "action": action,
+                                    "maneuver": "laneChange", "direction": "left"}}).encode())
     assert bool(pm.send.call_count) == accepted
 
   def test_remote_cannot_forge_local_link_heartbeat(self, mocker):
@@ -342,6 +343,17 @@ class TestStreamSession:
       "type": "turboIntentLinkState", "valid": True, "data": {"sessionId": "session", "connected": True},
     }).encode())
     pm.send.assert_not_called()
+
+  @pytest.mark.parametrize("kind", [None, "none", "invalid", "turn", "laneChange"])
+  @pytest.mark.parametrize("direction", ["none", "left", "right", "turnLeft"])
+  def test_intent_kind_and_direction_are_validated_before_forwarding(self, mocker, kind, direction):
+    pm = mocker.Mock()
+    proxy = CerealIncomingMessageProxy(pm, session_id="session")
+    data = {"sessionId": "session", "protocolVersion": 2, "action": "request", "direction": direction}
+    if kind is not None:
+      data["maneuver"] = kind
+    proxy.send(json.dumps({"type": "turboIntentRequest", "valid": True, "data": data}).encode())
+    assert bool(pm.send.call_count) == (kind in ("turn", "laneChange") and direction in ("left", "right"))
 
   def test_intent_heartbeat_stops_and_publishes_disconnect_on_cleanup(self, mocker):
     session = StreamSession.__new__(StreamSession)

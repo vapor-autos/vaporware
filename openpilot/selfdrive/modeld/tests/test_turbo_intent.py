@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from openpilot.cereal import log, messaging
-from openpilot.selfdrive.controls.lib.turbo_intent import IntentConfig, REQUEST_SERVICE, STATE_SERVICE, LINK_SERVICE
+from openpilot.selfdrive.controls.lib.turbo_intent import PROTOCOL_VERSION, IntentConfig, REQUEST_SERVICE, STATE_SERVICE, LINK_SERVICE
 from openpilot.selfdrive.modeld.turbo_intent import TurboIntentRuntime, INTENT_SUBSCRIPTIONS
 from openpilot.selfdrive.ui.turbo_intent import intent_label
 from openpilot.tools.turbo.intent import PaddleIntentController
@@ -25,6 +25,7 @@ class FakeSubMaster:
     self["turboSteerAssist"].baseModelLogMonoTime = 10_000_000_000
     self[LINK_SERVICE].sessionId = "session"
     self[LINK_SERVICE].connected = True
+    self[STATE_SERVICE].protocolVersion = PROTOCOL_VERSION
 
   def __getitem__(self, key):
     return self.data[key]
@@ -52,15 +53,47 @@ def ready_runtime(mode="execute"):
   return runtime, sm, pm
 
 
-def send_request(runtime, sm, now=10.6):
+def send_request(runtime, sm, now=10.6, button="left_paddle"):
   state = runtime.manager.snapshot(now)
   c = PaddleIntentController()
   c.update({}, [], state, int(now * 1e9), True, True, False, now)
-  request = c.update({"left_paddle": True}, [{"type": "button_down", "control": "left_paddle"}],
+  request = c.update({button: True}, [{"type": "button_down", "control": button}],
                      state, int(now * 1e9), True, True, False, now)
   sm[REQUEST_SERVICE].from_dict(request)
   sm.updated[REQUEST_SERVICE] = True
   return request
+
+
+@pytest.mark.parametrize("button,desire,opposite", [("S", log.Desire.turnLeft, log.Desire.turnRight),
+                                                   ("O", log.Desire.turnRight, log.Desire.turnLeft)])
+def test_turn_buttons_reach_correct_model_channel_and_keep_lane_change_metadata_off(button, desire, opposite):
+  runtime, sm, pm = ready_runtime()
+  send_request(runtime, sm, button=button)
+  assert runtime.before_inference(sm, 10.61) == desire
+  probabilities = [0.0] * 8
+  probabilities[desire], probabilities[opposite] = 0.4, 0.01
+  probabilities[log.Desire.laneChangeLeft] = 0.3
+  runtime.after_inference(desire, probabilities, 123, 10.62)
+  state = pm.sent[-1][1].turboIntentState
+  assert state.status == "executing" and state.maneuver == "turn" and state.consumedDesire == desire
+  assert state.modelResponseProbability == pytest.approx(0.4)
+  assert state.oppositeTurnProbability == pytest.approx(0.01)
+  assert state.laneChangeProbability == pytest.approx(0.3)
+  assert runtime.manager.lane_change_state == log.LaneChangeState.off
+  assert runtime.manager.lane_change_direction == log.LaneChangeDirection.none
+  assert runtime.manager.desire == log.Desire.none
+  sm.data[STATE_SERVICE] = state
+  assert "TURN: EXECUTING" in intent_label(sm, 10.62)
+
+
+@pytest.mark.parametrize("probabilities", [[], [0], [0, 0, 0, 0.9, 0, 0, 0, 0], [0, 0, 0.8, 0, 0, 0, 0, 0]])
+def test_lane_change_or_missing_or_opposite_output_cannot_acknowledge_left_turn(probabilities):
+  runtime, sm, _ = ready_runtime()
+  send_request(runtime, sm, button="S")
+  desire = runtime.before_inference(sm, 10.61)
+  runtime.after_inference(desire, probabilities, 123, 10.62)
+  runtime.after_inference(log.Desire.none, probabilities, 224, 15.7)
+  assert runtime.manager.status == "noModelResponse"
 
 
 @pytest.mark.parametrize("mode", ["shadow", "execute"])
@@ -73,13 +106,30 @@ def test_gcs_to_runtime_to_ui_without_hardware(mode):
   if mode == "execute":
     assert desire == log.Desire.laneChangeLeft
     assert state.status == "awaitingEvaluation" and state.pulseMonoTime == 0
-    runtime.after_inference(desire, 0.4, 123, 10.62)
+    runtime.after_inference(desire, [0, 0, 0, 0.4, 0, 0, 0, 0], 123, 10.62)
     state = pm.sent[-1][1].turboIntentState
     assert state.status == "executing" and state.pulseFrameId == 123
   else:
     assert desire == log.Desire.none and state.status == "shadow"
   sm.data[STATE_SERVICE] = state
   assert f"LEFT LANE CHANGE: {'EXECUTING' if mode == 'execute' else 'SHADOW'}" in intent_label(sm, 10.62)
+
+
+def test_uncapped_execute_environment_reaches_model_without_hardware(monkeypatch):
+  monkeypatch.setenv("TURBO_INTENT_MODE", "execute")
+  monkeypatch.setenv("TURBO_INTENT_MIN_SPEED", "0")
+  monkeypatch.setenv("TURBO_INTENT_MAX_SPEED", "0")
+  sm, pm = FakeSubMaster(), FakePubMaster()
+  runtime = TurboIntentRuntime(pm)
+  sm["carState"].vEgo = 0.5
+  runtime.before_inference(sm, 10.0)
+  sm.advance(10.6)
+  runtime.before_inference(sm, 10.6)
+  send_request(runtime, sm)
+  desire = runtime.before_inference(sm, 10.61)
+  assert desire == log.Desire.laneChangeLeft
+  runtime.after_inference(desire, [0, 0, 0, 0.4, 0, 0, 0, 0], 123, 10.62)
+  assert pm.sent[-1][1].turboIntentState.status == "executing"
 
 
 @pytest.mark.parametrize("service", ["carState", "carControl", "liveCalibration", "selfdriveState", "g29",
@@ -118,7 +168,7 @@ def test_stale_control_does_not_falsely_claim_active_maneuver_stopped():
   runtime, sm, _ = ready_runtime()
   send_request(runtime, sm)
   desire = runtime.before_inference(sm, 10.61)
-  runtime.after_inference(desire, 0.5, 1, 10.62)
+  runtime.after_inference(desire, [0, 0, 0, 0.5, 0, 0, 0, 0], 1, 10.62)
   sm.advance(10.9)
   sm.recv_time["carControl"] = 10.6
   runtime.before_inference(sm, 10.9)

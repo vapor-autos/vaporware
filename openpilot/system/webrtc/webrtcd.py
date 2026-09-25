@@ -342,6 +342,7 @@ class CerealIncomingMessageProxy:
     if msg_type == REQUEST_SERVICE:
       if (not self.session_id or not msg_json.get("valid") or not isinstance(msg_data, dict) or
           msg_data.get("sessionId") != self.session_id or msg_data.get("protocolVersion") != PROTOCOL_VERSION or
+          msg_data.get("maneuver") not in ("laneChange", "turn") or msg_data.get("direction") not in ("left", "right") or
           msg_data.get("action") not in ("request", "cancel")):
         return
     size = None

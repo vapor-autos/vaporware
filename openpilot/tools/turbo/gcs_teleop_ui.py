@@ -7,14 +7,16 @@ def main() -> None:
   monitor = monitor_geometry(os.getenv("TURBO_GCS_TELEOP_UI_MONITOR", "HDMI-1-0"))
   patch_undecorated_window("TURBO_GCS_TELEOP_UI_DECORATED")
 
-  from openpilot.system.ui.lib.application import GuiApplication
+  import openpilot.system.ui.lib.application as ui_application
+
+  # Widgets bind this shared application at import time. A separate local app
+  # leaves their font/texture caches uninitialized when the intent badge draws.
+  if monitor is not None:
+    ui_application.gui_app = ui_application.GuiApplication(monitor.width, monitor.height)
+
   from openpilot.tools.turbo.gcs_ui import GcsUi
 
-  if monitor is not None:
-    gui_app = GuiApplication(monitor.width, monitor.height)
-  else:
-    gui_app = GuiApplication()
-
+  gui_app = ui_application.gui_app
   gui_app.init_window("Turbo GCS")
   place_window("Turbo GCS", monitor)
 

@@ -63,9 +63,11 @@ struct TurboIntentRequest @0xf98d843bfd7004a3 {
   reverse @9 :Bool;
   localStatus @10 :Text;
   createdMonoTime @11 :UInt64;
+  maneuver @12 :Maneuver;
 
   enum Action { none @0; request @1; cancel @2; }
   enum Direction { none @0; left @1; right @2; }
+  enum Maneuver { none @0; laneChange @1; turn @2; }
 }
 
 struct TurboIntentState @0xb86e6369214c01c8 {
@@ -85,6 +87,10 @@ struct TurboIntentState @0xb86e6369214c01c8 {
   pulseMonoTime @13 :UInt64;
   laneChangeProbability @14 :Float32;
   operatorOverride @15 :Bool;
+  maneuver @16 :TurboIntentRequest.Maneuver;
+  modelResponseProbability @17 :Float32;
+  oppositeTurnProbability @18 :Float32;
+  consumedDesire @19 :UInt8;
 }
 
 struct TurboIntentLinkState @0xf416ec09499d9d19 {

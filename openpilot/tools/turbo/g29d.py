@@ -10,7 +10,7 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.selfdrive.controls.lib.turbo_steer_assist import g29_steering_to_angle_deg, steering_angle_to_g29_target
 from openpilot.tools.turbo.steer_assist import SteerAssistConfig, SteerAssistController, SteerAssistDecision, SteerAssistInput
 from openpilot.tools.turbo.teleop_metrics import default_latest_json_path, default_metrics_jsonl_path, env_bool, write_metrics_payload
-from openpilot.tools.turbo.intent import PaddleIntentController, read_intent_feedback
+from openpilot.tools.turbo.intent import MANEUVER_BUTTONS, IntentPublishSchedule, ManeuverIntentController, read_intent_feedback
 from openpilot.selfdrive.controls.lib.turbo_intent import REQUEST_SERVICE, STATE_SERVICE
 
 RETRY_DELAY = 2.0
@@ -487,7 +487,8 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
     assist_target_source = AssistTargetSource()
     haptic_target_limiter = HapticTargetLimiter()
     steer_assist_publisher = SteerAssistPublisher(steer_assist_sock)
-    intent_controller = PaddleIntentController()
+    intent_controller = ManeuverIntentController()
+    intent_publish_schedule = IntentPublishSchedule()
     steer_assist_metrics_file = default_latest_json_path(STEER_ASSIST_METRICS_NAME)
     steer_assist_trace_writer = _make_steer_assist_trace_writer()
     g29.listen()
@@ -570,7 +571,8 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
         state["buttons"], events, intent_feedback, intent_context.log_mono_time, intent_context.fresh,
         operator_ready, _accelerator_pedal(float(state["clutch"])) > 0.05, intent_context.now,
       )
-      if frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0:
+      intent_published = intent_publish_schedule.update(intent_request, frame % STEER_ASSIST_METRICS_INTERVAL_FRAMES == 0)
+      if intent_published:
         intent_msg = messaging.new_message(REQUEST_SERVICE, valid=True)
         intent_msg.turboIntentRequest = intent_request
         intent_sock.send(intent_msg.to_bytes())
@@ -599,9 +601,11 @@ def _run(g29_sock, steer_assist_sock, teleop_command_sock, intent_sock) -> None:
       intent_diagnostics = {
         "request": intent_request, "feedback": intent_feedback,
         "left_paddle": bool(state["buttons"].get("left_paddle")), "right_paddle": bool(state["buttons"].get("right_paddle")),
+        "square": bool(state["buttons"].get("S")), "circle": bool(state["buttons"].get("O")),
+        "button_events": [e for e in events if e.get("control") in MANEUVER_BUTTONS],
         "feedback_age_s": intent_context.age_s, "applied_feedback_age_s": intent_context.applied_age_s,
         "feedback_fresh": intent_context.fresh, "applied_feedback_fresh": intent_context.applied_fresh,
-        "operator_ready": operator_ready, "published": write_latest_metrics,
+        "operator_ready": operator_ready, "published": intent_published,
       }
       if steer_assist_trace_writer is not None:
         steer_assist_trace_writer.write({
